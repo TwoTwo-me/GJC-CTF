@@ -17,6 +17,15 @@ const BenchmarkSeedTupleSchema = z.tuple([
 export const BenchmarkSeedScheduleSchema = z.record(CtfIdSchema, BenchmarkSeedTupleSchema);
 export type BenchmarkSeedTuple = [string, string, string, string, string];
 export type BenchmarkSeedSchedule = Record<string, BenchmarkSeedTuple>;
+export const BenchmarkImplementationIdentitySchema = z
+	.object({
+		harnessSourceDigest: DigestSchema,
+		harnessBuildDigest: DigestSchema,
+		toolchainDigest: DigestSchema,
+		capabilityClosureDigest: DigestSchema,
+	})
+	.strict();
+export type BenchmarkImplementationIdentity = z.infer<typeof BenchmarkImplementationIdentitySchema>;
 
 export const BenchmarkCorpusEntrySchema = z
 	.object({
@@ -156,6 +165,9 @@ export function benchmarkBudgetDigest(manifest: Pick<BenchmarkManifestV1, "budge
 }
 export function benchmarkLockDigest(lock: BenchmarkLockV1 | Omit<BenchmarkLockV1, "lockDigest">): Digest {
 	return canonicalDigest(lock, ["lockDigest"]);
+}
+export function benchmarkImplementationIdentityDigest(identity: BenchmarkImplementationIdentity): Digest {
+	return canonicalDigest(BenchmarkImplementationIdentitySchema.parse(identity));
 }
 
 /** Deterministic repeat seed bound to immutable benchmark/challenge/repeat identity. */

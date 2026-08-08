@@ -21,7 +21,10 @@ import { runDeterministicFixtureBenchmark } from "../../../../benchmarks/gjc-ctf
 import { authorizedVersionStatsRequest } from "../../../../benchmarks/gjc-ctf/test-authority-fixture";
 import {
 	type BenchmarkCorpusEntry,
+	type BenchmarkImplementationIdentity,
+	BenchmarkImplementationIdentitySchema,
 	type BenchmarkManifestV1,
+	benchmarkImplementationIdentityDigest,
 	benchmarkLockDigest,
 	benchmarkManifestDigest,
 	benchmarkRepeatSeed,
@@ -37,11 +40,13 @@ import {
 } from "../../src/ctf/contracts/event";
 import {
 	type MetricsReportV1,
+	MetricsReportV1Schema,
 	metricsFingerprint,
 	repeatSeed,
 	validateMetricsReport,
 } from "../../src/ctf/contracts/metrics";
 import { oracleEntryDigest, oracleRegistryDigest, oracleResultDigest } from "../../src/ctf/contracts/oracle";
+
 import { operationalLimitsDigest, safetyPolicyDigest } from "../../src/ctf/contracts/sandbox";
 import { oracleTransitionSignaturePayload } from "../../src/ctf/graph/ontology";
 import { benchmarkCalibrationDigest } from "../../src/ctf/runtime/policy";
@@ -53,6 +58,14 @@ function requireDigest(value: string, label: string): Digest {
 }
 
 const SEEDS = benchmarkSeedSchedule("benchmark-1", ["challenge-1"])["challenge-1"];
+function implementationIdentity(): BenchmarkImplementationIdentity {
+	return {
+		harnessSourceDigest: sha256Hex("harness-source"),
+		harnessBuildDigest: sha256Hex("harness-build"),
+		toolchainDigest: sha256Hex("toolchain"),
+		capabilityClosureDigest: sha256Hex("capability-closure"),
+	};
+}
 
 function expectCtfCode(action: () => unknown, code: CtfError["code"]): void {
 	let caught: unknown;
@@ -512,6 +525,56 @@ describe("benchmark contracts", () => {
 			fixtureDigest: metricFixtureDigest(forgedUnsigned),
 		};
 		expect(runDeterministicFixtureBenchmark({ ...request, fixture: forged }).status).toBe("unavailable");
+	});
+	it("strictly validates stable implementation identity and binds it to metric fingerprints", () => {
+		const identity = implementationIdentity();
+		expect(BenchmarkImplementationIdentitySchema.safeParse(identity).success).toBe(true);
+		expect(
+			BenchmarkImplementationIdentitySchema.safeParse({
+				...identity,
+				legacyHarnessDigest: DIGEST,
+			}).success,
+		).toBe(false);
+		expect(
+			BenchmarkImplementationIdentitySchema.safeParse({
+				harnessDigest: identity.harnessSourceDigest,
+				toolchainDigest: identity.toolchainDigest,
+			}).success,
+		).toBe(false);
+
+		const identityDigest = benchmarkImplementationIdentityDigest(identity);
+		for (const field of [
+			"harnessSourceDigest",
+			"harnessBuildDigest",
+			"toolchainDigest",
+			"capabilityClosureDigest",
+		] as const) {
+			expect(
+				benchmarkImplementationIdentityDigest({
+					...identity,
+					[field]: sha256Hex(`changed-${field}`),
+				}),
+			).not.toBe(identityDigest);
+		}
+
+		const legacyReport = metricReport();
+		expect(MetricsReportV1Schema.safeParse(legacyReport).success).toBe(true);
+		const reportWithIdentity = metricReport({ implementationIdentity: identity });
+		expect(validateMetricsReport(reportWithIdentity)).toEqual(reportWithIdentity);
+
+		const { fingerprint: _fingerprint, ...unsignedReport } = reportWithIdentity;
+		const changedIdentityReport = {
+			...unsignedReport,
+			implementationIdentity: {
+				...identity,
+				harnessBuildDigest: sha256Hex("changed-harness-build"),
+			},
+		};
+		expect(metricsFingerprint(changedIdentityReport)).not.toBe(reportWithIdentity.fingerprint);
+		expectCtfCode(
+			() => validateMetricsReport({ ...changedIdentityReport, fingerprint: reportWithIdentity.fingerprint }),
+			"digest_mismatch",
+		);
 	});
 	it("rejects recomputed-but-tampered metric report metadata", () => {
 		const report = metricReport();

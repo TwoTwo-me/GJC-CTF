@@ -1,5 +1,5 @@
 import * as z from "zod/v4";
-import { BenchmarkSeedScheduleSchema, benchmarkRepeatSeed } from "./benchmark";
+import { BenchmarkImplementationIdentitySchema, BenchmarkSeedScheduleSchema, benchmarkRepeatSeed } from "./benchmark";
 import { CtfIdSchema, DigestSchema, NonNegativeIntegerSchema, PositiveIntegerSchema, TimestampSchema } from "./common";
 import { canonicalDigest, type Digest, digestsEqual } from "./digest";
 import { CtfError } from "./errors";
@@ -106,6 +106,8 @@ export const MetricsReportV1Schema = z
 		metricsSchemaVersion: z.literal(CTF_SCHEMA_VERSIONS.metrics),
 		benchmarkId: CtfIdSchema,
 		benchmarkLockDigest: DigestSchema,
+		/** Optional for legacy metric summaries; benchmark publication requires it. */
+		implementationIdentity: BenchmarkImplementationIdentitySchema.optional(),
 		/** Optional for legacy metric summaries; benchmark publication requires it. */
 		calibrationDigest: DigestSchema.optional(),
 		/** Optional for legacy metric summaries; benchmark publication requires it. */
