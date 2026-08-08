@@ -105,7 +105,6 @@ function score(text: string): number {
 			const gram = clean.slice(index, index + size);
 			if (!gram.includes(" ")) total += Math.log1p(NGRAMS.get(gram) ?? 0) - 0.35;
 		}
-	for (const word of ["the", "and", "that", "this", "with", "tion", "lactf"]) if (clean.includes(word)) total += 3;
 	return total;
 }
 

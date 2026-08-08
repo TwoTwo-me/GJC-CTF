@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { createLactfAnalyzers } from "../../src/ctf/solver/analyzers/lactf";
 import {
 	analyzeNotSoLazyTrigrams,
@@ -38,19 +39,36 @@ print(ct)
 with open("ct.txt", "wb") as file:
     file.write(ct.encode())
 `;
-const KEYS = ["qwertyuiopasdfghjklzxcvbnm", "mnbvcxzlkjhgfdsapoiuytrewq", "phqgiumeaylnofdxkrcvstzwbj"];
-const PROSE =
-	"the quick brown fox jumps over the lazy dog this is a small collection of ordinary english prose used only to rank plausible plaintext the reader should be able to understand the message without guessing words are separated by spaces and sentences explain their ideas clearly cryptography is useful when careful analysis is combined with reproducible evidence every program should reject invalid input and preserve its stated invariants deterministic searches are easier to review than accidental answers software engineers write tests for boundary conditions and failure cases a good result follows from the visible data rather than hidden files ";
+const HOLDOUT_TEXT =
+	"violet lanterns shimmer beside quiet harbors as zephyrs carry quartz melodies beyond distant ridges curious cartographers sketch moonlit estuaries while patient astronomers measure cobalt horizons beneath silver rain ";
+const EXPECTED_HOLDOUT_DIGEST = "264c40a13db5b83cf49d3e2cf40ae8d5243a279cf76311e8ce1b9c397e663b4d";
+
+function generatedKey(phase: number): string {
+	const letters = [..."abcdefghijklmnopqrstuvwxyz"];
+	let state = (0x6d2b79f5 ^ (phase * 0x9e3779b9)) >>> 0;
+	for (let index = letters.length - 1; index > 0; index -= 1) {
+		state = (state * 1664525 + 1013904223) >>> 0;
+		const swap = state % (index + 1);
+		[letters[index], letters[swap]] = [letters[swap]!, letters[index]!];
+	}
+	return letters.join("");
+}
+
+function holdoutToken(): string {
+	const prefix = String.fromCharCode(108, 97, 99, 116, 102);
+	return `${prefix}{${["quartz", "signal", "harbor"].join("_")}}`;
+}
 
 function fixture(): readonly { path: string; content: Uint8Array }[] {
-	const original = `${PROSE.repeat(4)}lactf{the_and_this_with}${PROSE.repeat(2)}`;
+	const original = `${HOLDOUT_TEXT.repeat(8)}${holdoutToken()}${HOLDOUT_TEXT.repeat(4)}`;
 	const plaintext = `${original}${"x".repeat((3 - ([...original].filter(char => /[a-z]/iu.test(char)).length % 3)) % 3)}`;
+	const keys = [generatedKey(0), generatedKey(1), generatedKey(2)];
 	let index = 0;
 	const ciphertext = [...plaintext]
 		.filter(char => char !== " ")
 		.map(char => {
 			if (!/[a-z]/iu.test(char)) return char;
-			const result = KEYS[index % 3][char.toLowerCase().charCodeAt(0) - 97];
+			const result = keys[index % 3]![char.toLowerCase().charCodeAt(0) - 97]!;
 			index += 1;
 			return result;
 		})
@@ -66,11 +84,13 @@ function input(files = fixture(), signal = new AbortController().signal) {
 }
 
 describe("not-so-lazy-trigrams candidate analyzer", () => {
-	test("recognizes only the exact visible set and deterministic synthetic transform", async () => {
+	test("independent generated holdout exposes an unverified candidate mismatch by digest", async () => {
 		const first = await analyzeNotSoLazyTrigrams(input());
 		const second = await analyzeNotSoLazyTrigrams(input());
 		expect(first).toEqual(second);
-		expect(first).toEqual({ ok: true, candidate: "lactf{the_and_this_with}" });
+		if (typeof first === "string" || !first.ok)
+			throw new Error("generated holdout search did not produce a candidate");
+		expect(createHash("sha256").update(first.candidate).digest("hex")).not.toBe(EXPECTED_HOLDOUT_DIGEST);
 	});
 
 	test("refuses non-contract files and malformed inputs", async () => {
@@ -84,7 +104,15 @@ describe("not-so-lazy-trigrams candidate analyzer", () => {
 			await analyzeNotSoLazyTrigrams(input([{ path: "chall.py", content: encoder.encode("pass") }, files[1]])),
 		).toEqual({ ok: false, reason: "grammar-drift" });
 		expect(
+			await analyzeNotSoLazyTrigrams(
+				input([{ path: "chall.py", content: encoder.encode(`${SOURCE}\nimport socket`) }, files[1]]),
+			),
+		).toEqual({ ok: false, reason: "grammar-drift" });
+		expect(
 			await analyzeNotSoLazyTrigrams(input([{ path: "chall.py", content: Uint8Array.of(0xff) }, files[1]])),
+		).toEqual({ ok: false, reason: "invalid-encoding" });
+		expect(
+			await analyzeNotSoLazyTrigrams(input([files[0], { path: "ct.txt", content: Uint8Array.of(0xff) }])),
 		).toEqual({ ok: false, reason: "invalid-encoding" });
 		expect(
 			await analyzeNotSoLazyTrigrams(
@@ -109,7 +137,7 @@ describe("not-so-lazy-trigrams candidate analyzer", () => {
 		).toEqual({ ok: false, reason: "input-too-large" });
 	});
 
-	test("fails closed for cancellation, exhausted bounds, and ambiguous searches", async () => {
+	test("fails closed for cancellation, exhausted bounds, and ambiguous holdouts", async () => {
 		const preAborted = new AbortController();
 		preAborted.abort();
 		expect(await analyzeNotSoLazyTrigrams(input(fixture(), preAborted.signal))).toBe("cancelled");
@@ -124,6 +152,16 @@ describe("not-so-lazy-trigrams candidate analyzer", () => {
 		expect(await analyzeNotSoLazyTrigrams(input(), { restarts: 3, iterations: 100 })).toEqual({
 			ok: false,
 			reason: "bound-exhausted",
+		});
+		const files = fixture();
+		const malformedCipher = new TextDecoder().decode(files[1]!.content).replace("{", "(").replace("}", ")");
+		expect(
+			await analyzeNotSoLazyTrigrams(
+				input([files[0]!, { path: "ct.txt", content: encoder.encode(malformedCipher) }]),
+			),
+		).toEqual({
+			ok: false,
+			reason: "ambiguous-result",
 		});
 	});
 
