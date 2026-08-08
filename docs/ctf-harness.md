@@ -99,6 +99,7 @@ Repository evidence lives under `artifacts/ctf/`:
 - `pwn-provider-live-smoke-v1.json`: candidate-free live proof that the pinned visible Tic-Tac-No ELF opened through the exact rootless, network-off, pull-never provider and emitted bounded output.
 - `fresh-endians-model-v3.json`: a fresh-secret, candidate-plaintext-free Endians fixture solved by the exact reviewed model and verified by the independent synthetic oracle; it proves the model route, not a corpus solve.
 - `pinned-ooo-model-v3.json`: candidate-plaintext-free proof that the exact reviewed model produced a candidate accepted by the reviewed local OOO checker; independent oracle authority is still absent, so it is not a scored or tier-promoting solve.
+- `pinned-flag-finder-z3-v1.json`: candidate-plaintext-free proof that the reviewed, content-addressed Z3 capability produced a bitmap satisfying independently replayed parsed nonogram constraints from the pinned visible source; no trusted oracle is available, so it remains unscored.
 - `ctf-dashboard-v3.png`: captured dashboard evidence.
 
 Version statistics distinguish known values from unavailable values. Solve rate, pass@k, latency, runtime, tokens, tool calls, cost, confidence, and holdout statistics are unavailable until two versions share complete independent authority over the same denominator. Do not convert diagnostic counts into scored metrics.
