@@ -68,6 +68,18 @@ describe("ELF inspection", () => {
 			mitigations: { pie: "unknown", nx: "enabled", relroSegment: true },
 		});
 	});
+	it("honors typed-array windows rather than inspecting the backing buffer", () => {
+		const source = elf64();
+		const backing = new Uint8Array(source.byteLength + 16);
+		backing.fill(0xff);
+		backing.set(source, 8);
+		const window = backing.subarray(8, 8 + source.byteLength);
+		expect(inspectElf64X86_64(window)).toMatchObject({
+			inputSha256: createHash("sha256").update(source).digest("hex"),
+			class: "ELF64",
+			machine: "x86-64",
+		});
+	});
 	it("does not infer NX when the GNU stack header is absent", () => {
 		expect(inspectElf64X86_64(elf64()).mitigations.nx).toBe("unknown");
 		expect(
@@ -99,5 +111,11 @@ describe("ELF inspection", () => {
 		expect(() =>
 			inspectElf64X86_64(elf64([{ type: 1, flags: 0, fileOffset: 0, fileSize: 2, memorySize: 1 }])),
 		).toThrow(/malformed/);
+		const oversizedTable = elf64([{ type: 1, flags: 0, fileOffset: 0, fileSize: 0, memorySize: 0 }]);
+		new DataView(oversizedTable.buffer).setBigUint64(32, BigInt(Number.MAX_SAFE_INTEGER) + 1n, true);
+		expect(() => inspectElf64X86_64(oversizedTable)).toThrow(/malformed/);
+		const oversizedSegment = elf64([{ type: 1, flags: 0, fileOffset: 0, fileSize: 0, memorySize: 0 }]);
+		new DataView(oversizedSegment.buffer).setBigUint64(64 + 8, BigInt(Number.MAX_SAFE_INTEGER) + 1n, true);
+		expect(() => inspectElf64X86_64(oversizedSegment)).toThrow(/malformed/);
 	});
 });
