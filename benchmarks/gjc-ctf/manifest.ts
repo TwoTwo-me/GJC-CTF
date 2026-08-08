@@ -141,17 +141,19 @@ export function validateReviewedImplementationIdentity(
 		reject("benchmark_provenance_missing", "scored benchmark requires a valid implementation identity");
 	}
 	const reviewed = evaluatorCapability?.reviewedImplementationIdentities;
-	if (!Array.isArray(reviewed)) {
+	if (!Array.isArray(reviewed) || reviewed.length === 0) {
 		reject("benchmark_provenance_missing", "scored benchmark requires externally reviewed implementation identity authority");
 	}
-	for (const candidate of reviewed) {
+	const parsedReviewed = reviewed.map(candidate => {
 		const parsed = BenchmarkImplementationIdentitySchema.safeParse(candidate);
 		if (!parsed.success) {
 			reject("benchmark_provenance_missing", "external implementation identity authority is invalid");
 		}
-		if (canonicalDigest(parsed.data) === canonicalDigest(identity.data)) return identity.data;
-	}
-	reject("benchmark_provenance_missing", "implementation identity is not externally reviewed");
+		return parsed.data;
+	});
+	const identityDigest = canonicalDigest(identity.data);
+	if (parsedReviewed.some(candidate => canonicalDigest(candidate) === identityDigest)) return identity.data;
+	reject("benchmark_lock_mismatch", "implementation identity is not externally reviewed");
 }
 
 function freeze<T>(value: T): T {

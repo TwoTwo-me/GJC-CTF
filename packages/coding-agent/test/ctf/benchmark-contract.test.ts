@@ -881,6 +881,11 @@ describe("benchmark contracts", () => {
 			reviewedImplementationIdentities: [identity],
 		};
 		const requestOnlyReview = { ...request, reviewedImplementationIdentities: [identity] };
+		const malformedTailCapability = {
+			...capability,
+			reviewedImplementationIdentities: [identity, { ...identity, unexpected: DIGEST }],
+		} as unknown as Parameters<typeof preflightBenchmark>[1];
+		const unreviewedIdentity = { ...identity, harnessBuildDigest: sha256Hex("unreviewed-build") };
 
 		expectCtfCode(() => preflightBenchmark(request), "benchmark_provenance_missing");
 		expectCtfCode(() => preflightBenchmark(request, oracleOnlyCapability), "benchmark_provenance_missing");
@@ -889,6 +894,11 @@ describe("benchmark contracts", () => {
 			() =>
 				preflightBenchmark({ ...request, implementationIdentity: { ...identity, unexpected: DIGEST } }, capability),
 			"benchmark_provenance_missing",
+		);
+		expectCtfCode(() => preflightBenchmark(request, malformedTailCapability), "benchmark_provenance_missing");
+		expectCtfCode(
+			() => preflightBenchmark({ ...request, implementationIdentity: unreviewedIdentity }, capability),
+			"benchmark_lock_mismatch",
 		);
 		expect(() => preflightBenchmark(request, capability)).not.toThrow();
 		expect(evaluateBenchmarkReport(request).status).toBe("unavailable");
@@ -952,7 +962,7 @@ describe("benchmark contracts", () => {
 					},
 					capability,
 				),
-			"benchmark_provenance_missing",
+			"benchmark_lock_mismatch",
 		);
 	});
 	it("binds every challenge repeat to a canonical schedule, including colon IDs", () => {
