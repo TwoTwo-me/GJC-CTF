@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
+import { readFile, realpath, stat } from "node:fs/promises";
 import * as path from "node:path";
-import { canonicalDigest } from "./contracts/digest";
+import { canonicalDigest, type Digest } from "./contracts/digest";
 
 export type BootstrapCategory =
 	| "essential"
@@ -29,12 +31,18 @@ export type CtfToolBootstrapManifest = Readonly<{
 	tools: readonly CtfToolSpec[];
 }>;
 
+export type ExecutableIdentity = Readonly<{
+	path: string;
+	sha256: Digest;
+}>;
+
 export type BootstrapObservation = Readonly<{
 	tool: string;
 	category: BootstrapCategory;
 	status: "ready" | "installable" | "unsupported" | "invalid";
 	version?: string;
 	argv?: readonly string[];
+	executable?: ExecutableIdentity;
 	reason?: string;
 }>;
 
@@ -42,7 +50,10 @@ export type BootstrapResult = Readonly<{
 	schemaVersion: "ctf-tool-bootstrap-result-1";
 	mode: "dry-run" | "apply";
 	platform: BootstrapPlatform;
+	bootstrapManifestDigest: Digest;
 	packageManager?: BootstrapPackageManager;
+	packageManagerIdentity?: ExecutableIdentity;
+	elevationIdentity?: ExecutableIdentity;
 	observations: readonly BootstrapObservation[];
 	commands: readonly (readonly string[])[];
 }>;
@@ -202,7 +213,7 @@ export const BUILTIN_CTF_TOOL_MANIFEST: CtfToolBootstrapManifest = freezeManifes
 	origin: "builtin",
 	tools: Object.values(CATEGORY_TOOLS).flat(),
 });
-const BUILTIN_CTF_TOOL_MANIFEST_DIGEST = canonicalDigest(BUILTIN_CTF_TOOL_MANIFEST);
+export const BUILTIN_CTF_TOOL_MANIFEST_DIGEST: Digest = canonicalDigest(BUILTIN_CTF_TOOL_MANIFEST);
 
 export class CtfBootstrapError extends Error {
 	readonly code = "invalid_tool_bootstrap" as const;
@@ -290,40 +301,105 @@ export function detectCtfPlatform(platform = process.platform): BootstrapPlatfor
 	throw new CtfBootstrapError(`Unsupported platform: ${platform}`);
 }
 
+export type TrustedExecutablePolicy = Readonly<{
+	roots: readonly string[];
+	operatorCwd: string;
+	rejectedRoots?: readonly string[];
+}>;
+
+export function defaultTrustedExecutablePolicy(
+	platform: BootstrapPlatform = detectCtfPlatform(),
+): TrustedExecutablePolicy {
+	const executableRoot = path.dirname(process.execPath);
+	const filesystemRoot = path.parse(process.execPath).root;
+	const roots =
+		platform === "linux"
+			? ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin", executableRoot]
+			: platform === "darwin"
+				? ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", executableRoot]
+				: [executableRoot, path.join(filesystemRoot, "Windows", "System32")];
+	return Object.freeze({
+		roots: Object.freeze([...new Set(roots.map(root => path.resolve(root)))]),
+		operatorCwd: filesystemRoot,
+		rejectedRoots: Object.freeze([path.resolve(process.cwd())]),
+	});
+}
+
+function isWithin(candidate: string, root: string): boolean {
+	const relative = path.relative(root, candidate);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function assertTrustedPolicy(policy: TrustedExecutablePolicy): readonly string[] {
+	const operatorCwd = path.resolve(policy.operatorCwd);
+	if (!path.isAbsolute(policy.operatorCwd) || operatorCwd === path.resolve("."))
+		throw new CtfBootstrapError("Operator cwd must be an absolute non-current directory.");
+	if (policy.roots.length === 0) throw new CtfBootstrapError("At least one trusted executable root is required.");
+	const rejected = (policy.rejectedRoots ?? []).map(root => path.resolve(root));
+	if (rejected.some(root => isWithin(operatorCwd, root)))
+		throw new CtfBootstrapError("Operator cwd must not be a challenge or competition root.");
+	return policy.roots.map(root => {
+		const resolved = path.resolve(root);
+		if (
+			!path.isAbsolute(root) ||
+			resolved === path.resolve(".") ||
+			rejected.some(blocked => isWithin(resolved, blocked))
+		)
+			throw new CtfBootstrapError("Executable roots must be trusted absolute operator roots.");
+		return resolved;
+	});
+}
+
+function sha256(bytes: Uint8Array): Digest {
+	return createHash("sha256").update(bytes).digest("hex") as Digest;
+}
+
+async function identityAt(candidate: string, roots: readonly string[]): Promise<ExecutableIdentity | undefined> {
+	try {
+		const resolved = await realpath(candidate);
+		if (
+			!path.isAbsolute(resolved) ||
+			!roots.some(root => resolved === root || resolved.startsWith(`${root}${path.sep}`))
+		)
+			return undefined;
+		if (!(await stat(resolved)).isFile()) return undefined;
+		return Object.freeze({ path: resolved, sha256: sha256(await readFile(resolved)) });
+	} catch {
+		return undefined;
+	}
+}
+
+export async function resolveTrustedExecutable(
+	binary: string,
+	policy: TrustedExecutablePolicy,
+): Promise<ExecutableIdentity | undefined> {
+	if (binary.length === 0 || path.basename(binary) !== binary || binary.includes("\0")) return undefined;
+	const roots = assertTrustedPolicy(policy);
+	for (const root of roots) {
+		const identity = await identityAt(path.join(root, binary), roots);
+		if (identity !== undefined) return identity;
+	}
+	return undefined;
+}
+
+async function assertCurrentIdentity(identity: ExecutableIdentity, policy: TrustedExecutablePolicy): Promise<void> {
+	const current = await identityAt(identity.path, assertTrustedPolicy(policy));
+	if (current === undefined || current.path !== identity.path || current.sha256 !== identity.sha256)
+		throw new CtfBootstrapError("Executable identity drifted before invocation.");
+}
+
+function executableName(manager: BootstrapPackageManager): string {
+	return manager === "apt" ? "apt-get" : manager;
+}
+
 export async function detectCtfPackageManager(
-	platform = detectCtfPlatform(),
-	env: NodeJS.ProcessEnv = process.env,
+	platform: BootstrapPlatform,
+	policy: TrustedExecutablePolicy,
 ): Promise<BootstrapPackageManager | undefined> {
 	const candidates: readonly BootstrapPackageManager[] =
 		platform === "darwin" ? ["brew"] : platform === "win32" ? ["winget"] : ["apt", "dnf", "pacman"];
-	const pathEntries = (env.PATH ?? "").split(platform === "win32" ? ";" : path.delimiter);
-	for (const manager of candidates) {
-		const executable = manager === "apt" ? "apt-get" : manager;
-		const executableNames =
-			platform === "win32"
-				? [
-						...new Set(
-							(env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
-								.split(";")
-								.map(extension => extension.trim())
-								.filter(
-									extension =>
-										extension.startsWith(".") && !extension.includes("/") && !extension.includes("\\"),
-								)
-								.map(extension => `${executable}${extension.toLowerCase()}`),
-						),
-					]
-				: [executable];
-		for (const directory of pathEntries) {
-			for (const executableName of executableNames) {
-				try {
-					if ((await Bun.file(path.join(directory, executableName)).stat()).isFile()) return manager;
-				} catch {
-					/* unavailable */
-				}
-			}
-		}
-	}
+	for (const manager of candidates)
+		if ((await resolveTrustedExecutable(executableName(manager), policy)) !== undefined) return manager;
 	return undefined;
 }
 
@@ -361,7 +437,7 @@ function packageInstallArgvs(
 	return Object.freeze([Object.freeze(elevate && manager !== "brew" ? ["sudo", "-n", ...command] : [...command])]);
 }
 
-function assertReviewedManifest(manifest: CtfToolBootstrapManifest, reviewedDigest: string): void {
+function assertReviewedManifest(manifest: CtfToolBootstrapManifest, reviewedDigest: Digest): void {
 	if (reviewedDigest !== BUILTIN_CTF_TOOL_MANIFEST_DIGEST || canonicalDigest(manifest) !== reviewedDigest)
 		throw new CtfBootstrapError("Tool manifest drifted from the reviewed builtin allowlist.");
 }
@@ -382,11 +458,18 @@ function versionAtLeast(output: string, minimum: string | undefined): boolean {
 
 export async function runExactArgv(
 	argv: readonly string[],
+	input: Readonly<{ identity: ExecutableIdentity; policy: TrustedExecutablePolicy }>,
 ): Promise<Readonly<{ exitCode: number; stdout: string; stderr: string }>> {
-	if (argv.length === 0 || argv.some(arg => arg.includes("\0")))
-		throw new CtfBootstrapError("Refusing an empty or NUL-containing command.");
+	if (argv.length === 0 || !path.isAbsolute(argv[0] ?? "") || argv.some(arg => arg.includes("\0")))
+		throw new CtfBootstrapError("Refusing a non-absolute or NUL-containing command.");
+	await assertCurrentIdentity(input.identity, input.policy);
 	try {
-		const child = Bun.spawn([...argv], { stdout: "pipe", stderr: "pipe" });
+		const child = Bun.spawn([...argv], {
+			cwd: input.policy.operatorCwd,
+			env: { PATH: "" },
+			stdout: "pipe",
+			stderr: "pipe",
+		});
 		const [stdout, stderr, exitCode] = await Promise.all([
 			new Response(child.stdout).text(),
 			new Response(child.stderr).text(),
@@ -407,6 +490,7 @@ export async function bootstrapCtfTools(
 		manifest?: unknown;
 		run?: BootstrapCommandRunner;
 		elevate?: boolean;
+		trustedExecutables?: TrustedExecutablePolicy;
 	}>,
 ): Promise<BootstrapResult> {
 	if (input.mode !== undefined && input.mode !== "dry-run" && input.mode !== "apply")
@@ -415,19 +499,31 @@ export async function bootstrapCtfTools(
 		throw new CtfBootstrapError("Unsupported CTF tool category.");
 	if (input.mode === "apply" && (input.categories === undefined || input.categories.length === 0))
 		throw new CtfBootstrapError("Apply mode requires at least one explicit tool category.");
+	const trustedExecutables =
+		input.trustedExecutables ?? defaultTrustedExecutablePolicy(input.platform ?? detectCtfPlatform());
+	assertTrustedPolicy(trustedExecutables);
 	const manifest =
 		input.manifest === undefined ? BUILTIN_CTF_TOOL_MANIFEST : validateCtfToolBootstrapManifest(input.manifest);
-	const reviewedDigest = canonicalDigest(manifest);
+	const reviewedDigest = canonicalDigest(manifest) as Digest;
 	const platform = input.platform ?? detectCtfPlatform();
-	const manager = input.packageManager ?? (await detectCtfPackageManager(platform));
+	const manager = input.packageManager ?? (await detectCtfPackageManager(platform, trustedExecutables));
+	const managerIdentity =
+		manager === undefined ? undefined : await resolveTrustedExecutable(executableName(manager), trustedExecutables);
+	if (manager !== undefined && managerIdentity === undefined)
+		throw new CtfBootstrapError("Reviewed package manager is unavailable in trusted roots.");
 	const elevate =
 		input.elevate ??
 		(platform !== "win32" && manager !== "brew" && typeof process.getuid === "function" && process.getuid() !== 0);
+	const elevationIdentity = elevate ? await resolveTrustedExecutable("sudo", trustedExecutables) : undefined;
 	const selected =
 		input.categories === undefined
 			? manifest.tools
 			: manifest.tools.filter(tool => input.categories?.includes(tool.category));
-	const run = input.run ?? runExactArgv;
+	const invoke = async (identity: ExecutableIdentity, tail: readonly string[]) => {
+		await assertCurrentIdentity(identity, trustedExecutables);
+		const argv = Object.freeze([identity.path, ...tail]);
+		return input.run === undefined ? runExactArgv(argv, { identity, policy: trustedExecutables }) : input.run(argv);
+	};
 	const observations: BootstrapObservation[] = [];
 	const missing: CtfToolSpec[] = [];
 	for (const tool of selected) {
@@ -440,10 +536,14 @@ export async function bootstrapCtfTools(
 			});
 			continue;
 		}
-		const result = await run(tool.versionArgv);
+		const identity = await resolveTrustedExecutable(tool.binary, trustedExecutables);
+		const result =
+			identity === undefined
+				? { exitCode: 127, stdout: "", stderr: "executable unavailable" }
+				: await invoke(identity, tool.versionArgv.slice(1));
 		const version = `${result.stdout}\n${result.stderr}`.trim();
-		if (result.exitCode === 0 && versionAtLeast(version, tool.minimumVersion))
-			observations.push({ tool: tool.id, category: tool.category, status: "ready", version });
+		if (identity !== undefined && result.exitCode === 0 && versionAtLeast(version, tool.minimumVersion))
+			observations.push({ tool: tool.id, category: tool.category, status: "ready", version, executable: identity });
 		else if (manager !== undefined && tool.packages[manager] !== undefined) {
 			missing.push(tool);
 			observations.push({
@@ -478,27 +578,45 @@ export async function bootstrapCtfTools(
 			throw new CtfBootstrapError("Selected tools cannot be installed on this platform.");
 		assertReviewedManifest(manifest, reviewedDigest);
 		for (const command of commands) {
-			const install = await run(command);
+			const commandIdentity = command[0] === "sudo" ? elevationIdentity : managerIdentity;
+			if (commandIdentity === undefined) throw new CtfBootstrapError("Installer identity is unavailable.");
+			const tail =
+				command[0] === "sudo"
+					? [command[1] as string, managerIdentity?.path as string, ...command.slice(3)]
+					: command.slice(1);
+			const install = await invoke(commandIdentity, tail);
 			if (install.exitCode !== 0)
 				throw new CtfBootstrapError(`Tool installation failed with exit code ${install.exitCode}.`);
 		}
 		for (const tool of missing) {
-			const result = await run(tool.versionArgv);
+			const identity = await resolveTrustedExecutable(tool.binary, trustedExecutables);
+			if (identity === undefined)
+				throw new CtfBootstrapError(`Installed tool did not pass verification: ${tool.id}.`);
+			const result = await invoke(identity, tool.versionArgv.slice(1));
 			const version = `${result.stdout}\n${result.stderr}`.trim();
 			if (result.exitCode !== 0 || !versionAtLeast(version, tool.minimumVersion))
 				throw new CtfBootstrapError(`Installed tool did not pass verification: ${tool.id}.`);
 			const index = observations.findIndex(observation => observation.tool === tool.id);
-			observations[index] = { tool: tool.id, category: tool.category, status: "ready", version };
+			observations[index] = {
+				tool: tool.id,
+				category: tool.category,
+				status: "ready",
+				version,
+				executable: identity,
+			};
 		}
 		if (observations.some(observation => observation.status !== "ready"))
 			throw new CtfBootstrapError("Selected tools remain unavailable after bootstrap.");
 	}
-	return {
+	return Object.freeze({
 		schemaVersion: "ctf-tool-bootstrap-result-1",
 		mode: input.mode ?? "dry-run",
 		platform,
-		packageManager: manager,
-		observations,
-		commands,
-	};
+		bootstrapManifestDigest: reviewedDigest,
+		...(manager === undefined ? {} : { packageManager: manager }),
+		...(managerIdentity === undefined ? {} : { packageManagerIdentity: managerIdentity }),
+		...(elevationIdentity === undefined ? {} : { elevationIdentity }),
+		observations: Object.freeze(observations),
+		commands: Object.freeze(commands),
+	});
 }

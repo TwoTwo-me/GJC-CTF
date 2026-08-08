@@ -1,4 +1,11 @@
-import type { BootstrapCategory } from "../bootstrap";
+import {
+	type BootstrapCategory,
+	type BootstrapResult,
+	BUILTIN_CTF_TOOL_MANIFEST,
+	BUILTIN_CTF_TOOL_MANIFEST_DIGEST,
+	type ExecutableIdentity,
+	toolsForCategories,
+} from "../bootstrap";
 import { canonicalDigest, type Digest, digestsEqual, isDigest } from "../contracts/digest";
 import { LACTF_CORPUS_SOURCES } from "../corpus";
 
@@ -25,6 +32,33 @@ export type SolverRoute = Readonly<{
 	attemptLimits: SolverAttemptLimits;
 	routeDigest: Digest;
 }>;
+export type SolverCapabilityTool = Readonly<{
+	toolId: string;
+	category: BootstrapCategory;
+	version: string;
+	executable: ExecutableIdentity;
+	probeArgvDigest: Digest;
+}>;
+
+export type SolverCapabilityClosureV1 = Readonly<{
+	schemaVersion: "ctf-solver-capability-closure-1";
+	challengeId: string;
+	routeDigest: Digest;
+	categoryPlanDigest: Digest;
+	bootstrapManifestDigest: Digest;
+	platform: "linux" | "darwin" | "win32";
+	tools: readonly SolverCapabilityTool[];
+	reviewedInstallArgvDigests: readonly Digest[];
+	closureDigest: Digest;
+}>;
+
+export type SolverCapabilityClosureResult =
+	| Readonly<{ closed: true; closure: SolverCapabilityClosureV1 }>
+	| Readonly<{
+			closed: false;
+			observations: BootstrapResult["observations"];
+			reviewedCommands: BootstrapResult["commands"];
+	  }>;
 
 export type BootstrapCategoryPlan = Readonly<{
 	challengeId: string;
@@ -279,3 +313,119 @@ export function bootstrapCategoryPlanFor(challengeId: unknown): BootstrapCategor
 
 export const getSolverRoute = solverRouteFor;
 export const createBootstrapCategoryPlan = bootstrapCategoryPlanFor;
+/**
+ * Composes reviewed route requirements with bootstrap evidence. This is preflight
+ * evidence only: it neither schedules work nor grants solve, oracle, or scoring authority.
+ */
+export function closeSolverRouteCapabilities(
+	input: Readonly<{
+		challengeId: unknown;
+		bootstrap: BootstrapResult;
+	}>,
+): SolverCapabilityClosureResult {
+	const route = solverRouteFor(input.challengeId);
+	const plan = bootstrapCategoryPlanFor(route.challengeId);
+	const required = toolsForCategories(plan.categories);
+	const bootstrap = input.bootstrap;
+	const reviewedInstallArgvDigests = reviewedCommandDigests(
+		bootstrap,
+		required.map(tool => tool.id),
+	);
+	if (
+		bootstrap.bootstrapManifestDigest !== BUILTIN_CTF_TOOL_MANIFEST_DIGEST ||
+		canonicalDigest(BUILTIN_CTF_TOOL_MANIFEST) !== BUILTIN_CTF_TOOL_MANIFEST_DIGEST ||
+		reviewedInstallArgvDigests === undefined
+	)
+		return Object.freeze({
+			closed: false,
+			observations: bootstrap.observations,
+			reviewedCommands: bootstrap.commands,
+		});
+	const byId = new Map(bootstrap.observations.map(observation => [observation.tool, observation]));
+	const tools: SolverCapabilityTool[] = [];
+	for (const requiredTool of required) {
+		const observation = byId.get(requiredTool.id);
+		if (
+			observation === undefined ||
+			observation.category !== requiredTool.category ||
+			observation.status !== "ready" ||
+			observation.version === undefined ||
+			observation.executable === undefined ||
+			!pathIsAbsolute(observation.executable.path)
+		)
+			return Object.freeze({
+				closed: false,
+				observations: bootstrap.observations,
+				reviewedCommands: bootstrap.commands,
+			});
+		tools.push(
+			Object.freeze({
+				toolId: requiredTool.id,
+				category: requiredTool.category,
+				version: observation.version,
+				executable: observation.executable,
+				probeArgvDigest: canonicalDigest(requiredTool.versionArgv),
+			}),
+		);
+	}
+	if (bootstrap.observations.length !== required.length)
+		return Object.freeze({
+			closed: false,
+			observations: bootstrap.observations,
+			reviewedCommands: bootstrap.commands,
+		});
+	const closureBase = {
+		schemaVersion: "ctf-solver-capability-closure-1" as const,
+		challengeId: route.challengeId,
+		routeDigest: route.routeDigest,
+		categoryPlanDigest: plan.planDigest,
+		bootstrapManifestDigest: BUILTIN_CTF_TOOL_MANIFEST_DIGEST,
+		platform: bootstrap.platform,
+		tools: Object.freeze(tools),
+		reviewedInstallArgvDigests: Object.freeze(reviewedInstallArgvDigests),
+	};
+	return Object.freeze({
+		closed: true,
+		closure: Object.freeze({ ...closureBase, closureDigest: canonicalDigest(closureBase) }),
+	});
+}
+
+function pathIsAbsolute(value: string): boolean {
+	return value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value);
+}
+function reviewedCommandDigests(
+	bootstrap: BootstrapResult,
+	requiredToolIds: readonly string[],
+): readonly Digest[] | undefined {
+	if (bootstrap.commands.length === 0) return [];
+	const manager = bootstrap.packageManager;
+	if (manager === undefined) return undefined;
+	const allowedPackages = new Set(
+		BUILTIN_CTF_TOOL_MANIFEST.tools
+			.filter(tool => requiredToolIds.includes(tool.id))
+			.map(tool => tool.packages[manager])
+			.filter((packageName): packageName is string => packageName !== undefined),
+	);
+	const prefix =
+		manager === "apt"
+			? ["apt-get", "install", "-y"]
+			: manager === "brew"
+				? ["brew", "install"]
+				: manager === "pacman"
+					? ["pacman", "-S", "--noconfirm"]
+					: manager === "dnf"
+						? ["dnf", "install", "-y"]
+						: ["winget", "install", "--exact", "--id"];
+	for (const command of bootstrap.commands) {
+		const logical = command[0] === "sudo" ? command.slice(2) : command;
+		if (prefix.some((part, index) => logical[index] !== part)) return undefined;
+		const packages =
+			manager === "winget"
+				? logical.filter(
+						(part, index) => index > 3 && part !== "--source" && part !== "winget" && !part.startsWith("--"),
+					)
+				: logical.slice(prefix.length);
+		if (packages.length === 0 || packages.some(packageName => !allowedPackages.has(packageName))) return undefined;
+	}
+	return bootstrap.commands.map(command => canonicalDigest(command));
+}

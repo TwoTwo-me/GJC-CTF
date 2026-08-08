@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { type BootstrapResult, BUILTIN_CTF_TOOL_MANIFEST_DIGEST, toolsForCategories } from "../../src/ctf/bootstrap";
 import { canonicalDigest } from "../../src/ctf/contracts/digest";
 import { LACTF_CORPUS_SOURCES } from "../../src/ctf/corpus";
 import {
 	bootstrapCategoryPlanFor,
+	closeSolverRouteCapabilities,
 	LACTF_SOLVER_ROUTE_REGISTRY_DIGEST,
 	LACTF_SOLVER_ROUTES,
 	solverRouteFor,
@@ -123,5 +125,81 @@ describe("LA CTF solver route registry", () => {
 			expect(Object.keys(route).some(key => /solution|flag|archive/i.test(key))).toBe(false);
 			expect(Object.keys(route.attemptLimits).some(key => /solution|flag|archive/i.test(key))).toBe(false);
 		}
+	});
+	test("closes each reviewed route over its exact manifest-ordered tool set and seals digest drift", () => {
+		for (const route of LACTF_SOLVER_ROUTES) {
+			const required = toolsForCategories(route.bootstrapCategories);
+			const bootstrap: BootstrapResult = {
+				schemaVersion: "ctf-tool-bootstrap-result-1",
+				mode: "dry-run",
+				platform: "linux",
+				bootstrapManifestDigest: BUILTIN_CTF_TOOL_MANIFEST_DIGEST,
+				observations: required.map((tool, index) => ({
+					tool: tool.id,
+					category: tool.category,
+					status: "ready" as const,
+					version: "1",
+					executable: { path: `/operator/bin/${tool.binary}`, sha256: canonicalDigest(`${index}`) },
+				})),
+				commands: [],
+			};
+			const result = closeSolverRouteCapabilities({ challengeId: route.challengeId, bootstrap });
+			expect(result.closed).toBe(true);
+			if (!result.closed) throw new Error("reviewed route did not close");
+			expect(result.closure.tools.map(tool => tool.toolId)).toEqual(required.map(tool => tool.id));
+			expect(result.closure.categoryPlanDigest).toBe(bootstrapCategoryPlanFor(route.challengeId).planDigest);
+			expect(result.closure.closureDigest).toBe(
+				canonicalDigest({
+					schemaVersion: result.closure.schemaVersion,
+					challengeId: result.closure.challengeId,
+					routeDigest: result.closure.routeDigest,
+					categoryPlanDigest: result.closure.categoryPlanDigest,
+					bootstrapManifestDigest: result.closure.bootstrapManifestDigest,
+					platform: result.closure.platform,
+					tools: result.closure.tools,
+					reviewedInstallArgvDigests: result.closure.reviewedInstallArgvDigests,
+				}),
+			);
+		}
+	});
+
+	test("refuses closure when bootstrap digest, command evidence, or a required identity drifts", () => {
+		const route = solverRouteFor("lactf-2026-rev-flag-finder");
+		const required = toolsForCategories(route.bootstrapCategories);
+		const bootstrap: BootstrapResult = {
+			schemaVersion: "ctf-tool-bootstrap-result-1",
+			mode: "dry-run",
+			platform: "linux",
+			bootstrapManifestDigest: canonicalDigest("drift"),
+			observations: required.map(tool => ({
+				tool: tool.id,
+				category: tool.category,
+				status: "ready" as const,
+				version: "1",
+				executable: { path: `/operator/bin/${tool.binary}`, sha256: canonicalDigest("tool") },
+			})),
+			commands: [],
+		};
+		expect(closeSolverRouteCapabilities({ challengeId: route.challengeId, bootstrap }).closed).toBe(false);
+		expect(
+			closeSolverRouteCapabilities({
+				challengeId: route.challengeId,
+				bootstrap: {
+					...bootstrap,
+					bootstrapManifestDigest: BUILTIN_CTF_TOOL_MANIFEST_DIGEST,
+					commands: [["apt-get", "install"]],
+				},
+			}).closed,
+		).toBe(false);
+		expect(
+			closeSolverRouteCapabilities({
+				challengeId: route.challengeId,
+				bootstrap: {
+					...bootstrap,
+					bootstrapManifestDigest: BUILTIN_CTF_TOOL_MANIFEST_DIGEST,
+					observations: bootstrap.observations.slice(0, -1),
+				},
+			}).closed,
+		).toBe(false);
 	});
 });
