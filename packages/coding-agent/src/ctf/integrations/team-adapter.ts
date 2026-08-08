@@ -445,7 +445,7 @@ function normalizedVerificationEvidence(value: CtfTeamVerificationEvidence): Ctf
 }
 
 function normalizedPreflightEvidence(value: CtfTeamPreflightEvidence): CtfTeamPreflightEvidence {
-	if (!value || value.kind !== "preflight" || value.passed !== true) {
+	if (value?.kind !== "preflight" || value.passed !== true) {
 		throw new CtfError("missing_provenance", "team promotion requires a passed preflight");
 	}
 	const summary = requiredString(value.summary, "preflight summary");
@@ -462,7 +462,7 @@ function normalizedPreflightEvidence(value: CtfTeamPreflightEvidence): CtfTeamPr
 }
 
 function normalizedIndependenceEvidence(value: CtfTeamIndependenceEvidence): CtfTeamIndependenceEvidence {
-	if (!value || value.kind !== "independence" || value.independent !== true) {
+	if (value?.kind !== "independence" || value.independent !== true) {
 		throw new CtfError("missing_provenance", "team promotion requires independent evidence");
 	}
 	const summary = requiredString(value.summary, "independence summary");
@@ -480,8 +480,7 @@ function normalizedIndependenceEvidence(value: CtfTeamIndependenceEvidence): Ctf
 
 function normalizedInformationGainEvidence(value: CtfTeamInformationGainEvidence): CtfTeamInformationGainEvidence {
 	if (
-		!value ||
-		value.kind !== "information_gain" ||
+		value?.kind !== "information_gain" ||
 		typeof value.gain !== "number" ||
 		!Number.isFinite(value.gain) ||
 		value.gain <= 0
@@ -781,7 +780,7 @@ export function createCtfTeamAdapter(options: CtfTeamAdapterOptions = {}): CtfTe
 			}
 			if (
 				disposition === "confirmed" &&
-				(!task || task.status !== "completed" || !taskHasVerifiedCompletionEvidence(task))
+				(task?.status !== "completed" || !taskHasVerifiedCompletionEvidence(task))
 			) {
 				throw new CtfError(
 					"missing_evidence",

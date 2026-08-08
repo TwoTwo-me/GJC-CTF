@@ -1,5 +1,5 @@
-import type { AssistantMessage } from "@gajae-code/ai";
 import * as os from "node:os";
+import type { AssistantMessage } from "@gajae-code/ai";
 import { Settings } from "../../config/settings";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "../../sdk/session";
 import type { AgentSession, PromptOptions } from "../../session/agent-session";

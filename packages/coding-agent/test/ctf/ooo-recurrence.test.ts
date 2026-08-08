@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { analyzeOooRecurrenceSource, createOooRecurrenceAnalyzer } from "../../src/ctf/solver/analyzers/ooo-recurrence";
 import { canonicalDigest } from "../../src/ctf/contracts/digest";
+import { analyzeOooRecurrenceSource, createOooRecurrenceAnalyzer } from "../../src/ctf/solver/analyzers/ooo-recurrence";
 import type { LocalSolverSessionInput } from "../../src/ctf/solver/local-backend";
 import { solverRouteFor } from "../../src/ctf/solver/router";
 

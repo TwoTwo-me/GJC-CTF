@@ -8,6 +8,7 @@ import {
 	materializeCorpusEntry,
 	validateCorpusEntry,
 } from "../../src/ctf/corpus";
+
 async function git(cwd: string, args: readonly string[]): Promise<void> {
 	const executable = Bun.which("git");
 	if (executable === null) throw new Error("git is required for corpus fixtures");

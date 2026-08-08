@@ -299,8 +299,7 @@ export function assertBenchmarkLockMatchesManifest(lock: BenchmarkLockV1, manife
 		[
 			(manifest.seeds === undefined && lock.seeds === undefined) ||
 				(manifest.seeds !== undefined &&
-					lock.seeds !== undefined &&
-					lock.seeds.every((seed, index) => seed === manifest.seeds?.[index])),
+					lock.seeds?.every((seed, index) => seed === manifest.seeds?.[index]) === true),
 			"seeds",
 		],
 		[digestsEqual(lock.corpusDigest, benchmarkCorpusDigest(manifest)), "corpus digest"],

@@ -3,10 +3,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CTF_CAMPAIGN_HARD_STOP, runCtfCampaign } from "../../src/ctf/campaign/controller";
+import { sha256Hex } from "../../src/ctf/contracts/digest";
 import type { CorpusEntry, MaterializedCorpus } from "../../src/ctf/corpus";
 import { LACTF_2026_CORPUS_SOURCES } from "../../src/ctf/corpus";
 import type { CtfSolverBackend, CtfTerminationRequest } from "../../src/ctf/runtime/scheduler";
-import { sha256Hex } from "../../src/ctf/contracts/digest";
 
 const roots: string[] = [];
 const digest = sha256Hex("campaign-fixture");

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createLactfTier1Analyzers } from "../../src/ctf/solver/analyzers/lactf-tier1";
-import { solverRouteFor, type SolverRoute } from "../../src/ctf/solver/router";
+import { type SolverRoute, solverRouteFor } from "../../src/ctf/solver/router";
 
 describe("LA CTF Tier 1 analyzer registry", () => {
 	test("matches every reviewed active-tier route exactly", () => {

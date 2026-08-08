@@ -1,9 +1,16 @@
 import { generateKeyPairSync, sign } from "node:crypto";
-import { benchmarkManifestDigest, benchmarkRepeatSeed } from "../../packages/coding-agent/src/ctf/contracts/benchmark";
+import {
+	benchmarkManifestDigest,
+	benchmarkSeedSchedule,
+	type BenchmarkManifestV1,
+} from "../../packages/coding-agent/src/ctf/contracts/benchmark";
 import { createBenchmarkLock } from "./manifest";
 import { canonicalDigest, canonicalJson, sha256Hex } from "../../packages/coding-agent/src/ctf/contracts/digest";
 import { oracleEvidenceDigest, oracleTransitionDigest } from "../../packages/coding-agent/src/ctf/contracts/event";
-import { metricsFingerprint } from "../../packages/coding-agent/src/ctf/contracts/metrics";
+import {
+	metricsFingerprint,
+	type MetricsReportV1,
+} from "../../packages/coding-agent/src/ctf/contracts/metrics";
 import { oracleEntryDigest, oracleRegistryDigest, oracleResultDigest } from "../../packages/coding-agent/src/ctf/contracts/oracle";
 import { operationalLimitsDigest, safetyPolicyDigest } from "../../packages/coding-agent/src/ctf/contracts/sandbox";
 import { benchmarkCalibrationDigest } from "../../packages/coding-agent/src/ctf/runtime/policy";
@@ -39,8 +46,8 @@ export function authorizedVersionStatsRequest() {
 	const limits = { ...limitsBase, limitsDigest: operationalLimitsDigest(limitsBase) };
 	const calibrationUnsigned = { schemaVersion: "ctf-benchmark-calibration-1" as const, calibrationId: "fixture-calibration", operationalLimitsDigest: limits.limitsDigest, selectedFor: "benchmark" as const, eligibleDenominator: 1, thresholds: { passAt1: 0, targetPassCount: 0, floorPassCount: 0 } };
 	const calibration = { ...calibrationUnsigned, calibrationDigest: benchmarkCalibrationDigest(calibrationUnsigned) };
-	const seeds = { "fixture-challenge": [0, 1, 2, 3, 4].map(index => benchmarkRepeatSeed("fixture-benchmark", "fixture-challenge", index)) };
-	const manifestUnsigned = { schemaVersion: "ctf-benchmark-1" as const, benchmarkId: "fixture-benchmark", createdAt: "2026-01-01T00:00:00.000Z", sourceCommit: "commit", corpus: [{ challengeId: "fixture-challenge", category: "fixture", sourceRef: "source", sourceRevision: "revision", sourceSha256: digest("source"), permissionRef: "permission", artifactDigests: [digest("artifact")], executionClass: "verified-local/rootless-podman-network-off", backendDigest: digest("backend"), solverVisibleAllowlist: ["input.txt"], oracleId: entry.oracleId, oracleDigest: oracleEntryDigest(entry) }], holdoutChallengeIds: [], eligibilityPolicyVersion: "fixture-eligibility", objective: "competition-solve-first" as const, budget: { wallMs: 1000, inputTokens: 0, outputTokens: 0, toolCalls: 0, costCents: 0 }, repeatCount: 5 as const, seedSchedule: seeds, seeds: seeds["fixture-challenge"], modelPolicyId: "fixture-model", modelConfigDigest: digest("model"), skill, backendPolicyDigest: digest("backend-policy"), oracleRegistryDigest: registry.registryDigest, safetyPolicyDigest: safety.policyDigest, calibrationId: calibration.calibrationId, operationalLimitsDigest: limits.limitsDigest, reportRoot: "reports" };
+	const seeds = benchmarkSeedSchedule("fixture-benchmark", ["fixture-challenge"]);
+	const manifestUnsigned: Omit<BenchmarkManifestV1, "manifestDigest"> = { schemaVersion: "ctf-benchmark-1" as const, benchmarkId: "fixture-benchmark", createdAt: "2026-01-01T00:00:00.000Z", sourceCommit: "commit", corpus: [{ challengeId: "fixture-challenge", category: "fixture", sourceRef: "source", sourceRevision: "revision", sourceSha256: digest("source"), permissionRef: "permission", artifactDigests: [digest("artifact")], executionClass: "verified-local/rootless-podman-network-off", backendDigest: digest("backend"), solverVisibleAllowlist: ["input.txt"], oracleId: entry.oracleId, oracleDigest: oracleEntryDigest(entry) }], holdoutChallengeIds: [], eligibilityPolicyVersion: "fixture-eligibility", objective: "competition-solve-first" as const, budget: { wallMs: 1000, inputTokens: 0, outputTokens: 0, toolCalls: 0, costCents: 0 }, repeatCount: 5 as const, seedSchedule: seeds, seeds: seeds["fixture-challenge"], modelPolicyId: "fixture-model", modelConfigDigest: digest("model"), skill, backendPolicyDigest: digest("backend-policy"), oracleRegistryDigest: registry.registryDigest, safetyPolicyDigest: safety.policyDigest, calibrationId: calibration.calibrationId, operationalLimitsDigest: limits.limitsDigest, reportRoot: "reports" };
 	const manifest = { ...manifestUnsigned, manifestDigest: benchmarkManifestDigest(manifestUnsigned) };
 	const lock = createBenchmarkLock(manifest);
 	const context = { eventType: "node" as const, challengeId: "fixture-challenge", before: { state: "planned" }, after: { state: "verified" } };
@@ -51,12 +58,12 @@ export function authorizedVersionStatsRequest() {
 		return { ...unsigned, signature: sign(null, Buffer.from(canonicalJson(oracleTransitionSignaturePayload({ eventType: "node_transition", challengeId: context.challengeId, proof: unsigned }))), signer.privateKey).toString("base64") };
 	}
 	const runs = seeds["fixture-challenge"].map((seed, repeatIndex) => {
-		const resultUnsigned = { schemaVersion: "ctf-oracle-result-1" as const, oracleId: entry.oracleId, runId: `fixture-run-${repeatIndex}`, challengeId: "fixture-challenge", nonce: `nonce-${repeatIndex}`, candidateDigest: digest(`candidate-${repeatIndex}`), inputDigest: digest(`input-${repeatIndex}`), verdict: "fail" as const, verifierVersion: "v1", outputDigest: digest(`output-${repeatIndex}`), sanitizedSummary: "fail" };
+		const resultUnsigned = { schemaVersion: "ctf-oracle-result-1" as const, oracleId: entry.oracleId, runId: `fixture-run-${repeatIndex}`, challengeId: "fixture-challenge", nonce: `nonce-${repeatIndex}`, candidateDigest: digest(`candidate-${repeatIndex}`), inputDigest: digest(`input-${repeatIndex}`), verdict: "fail" as const, verifierVersion: "v1", outputDigest: digest(`output-${repeatIndex}`), sanitizedSummary: "fail" as const };
 		const result = { ...resultUnsigned, signature: sign(null, Buffer.from(canonicalJson(resultUnsigned)), resultAuthority.privateKey).toString("base64") };
 		const runtimeEvidenceDigest = oracleResultDigest(result); const evidenceRefs = [preflightReportDigest, runtimeEvidenceDigest];
 		return { runId: result.runId, challengeId: "fixture-challenge", repeatIndex, seed, validatedSolve: false, outcome: "fail" as const, wallTimeMs: 100, firstValidTimeMs: null, manualInterventionCount: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, toolCalls: 0, cost: { status: "known" as const, cents: 0, source: "meter" }, codeCommit: "commit", benchmarkLockDigest: lock.lockDigest, effectiveSkillDigest: canonicalDigest(skill), modelFingerprint: lock.modelConfigDigest, backendFingerprint: lock.backendPolicyDigest, calibrationDigest: calibration.calibrationDigest, category: "fixture", preflightReportDigest, runtimeEvidenceDigest, evidenceRefs, preflightProof: proof("preflight", evidenceRefs, runtimeEvidenceDigest), runtimeProof: proof("oracle", evidenceRefs, runtimeEvidenceDigest), signedOracleProof: { verified: true as const, result, entry, key: resultAuthority.key, registryDigest: registry.registryDigest }, oracleProofContext: context };
 	});
-	const reportUnsigned = { metricsSchemaVersion: "ctf-metrics-1" as const, benchmarkId: manifest.benchmarkId, benchmarkLockDigest: lock.lockDigest, calibrationDigest: calibration.calibrationDigest, eligibleChallengeIds: ["fixture-challenge"], createdAt: "2026-01-01T00:00:00.000Z", repeatCount: 5 as const, seedSchedule: seeds, seeds: seeds["fixture-challenge"], runs, passAt1: 0, passAt3: 0, categoryAggregates: [{ category: "fixture", numerator: 0, denominator: 1, excludedCount: 0, unknownCount: 0 }], p50WallTimeMs: 100, p95WallTimeMs: 100, manualInterventionCount: 0, unknownCount: 0, targetPassCount: 0, floorPassCount: 0, achievedPassCount: 0 };
+	const reportUnsigned: Omit<MetricsReportV1, "fingerprint"> = { metricsSchemaVersion: "ctf-metrics-1" as const, benchmarkId: manifest.benchmarkId, benchmarkLockDigest: lock.lockDigest, calibrationDigest: calibration.calibrationDigest, eligibleChallengeIds: ["fixture-challenge"], createdAt: "2026-01-01T00:00:00.000Z", repeatCount: 5 as const, seedSchedule: seeds, seeds: seeds["fixture-challenge"], runs, passAt1: 0, passAt3: 0, categoryAggregates: [{ category: "fixture", numerator: 0, denominator: 1, excludedCount: 0, unknownCount: 0 }], p50WallTimeMs: 100, p95WallTimeMs: 100, manualInterventionCount: 0, unknownCount: 0, targetPassCount: 0, floorPassCount: 0, achievedPassCount: 0 };
 	const report = { ...reportUnsigned, fingerprint: metricsFingerprint(reportUnsigned) };
 	const runtimeEvidenceDigest = runs[0].runtimeEvidenceDigest;
 	const evidenceRefs = [preflightReportDigest, runtimeEvidenceDigest];

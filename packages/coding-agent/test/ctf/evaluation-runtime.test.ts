@@ -9,10 +9,9 @@ import {
 } from "../../src/ctf/contracts/evaluation";
 import { oracleRegistryDigest } from "../../src/ctf/contracts/oracle";
 import { assertBrowserSessionTarget, createOfflineCheckerAdapter } from "../../src/ctf/runtime/adapters";
-import { verifyTrustedOracleResult } from "../../src/ctf/runtime/oracle";
 import {
-	deliverSecretLease,
 	type CandidateCollector,
+	deliverSecretLease,
 	type EvaluationLineageInput,
 	type EvaluationRuntimeAdapter,
 	evaluateLocalCandidate,
@@ -20,6 +19,7 @@ import {
 	type SecretSink,
 	type TrustedOracleCallback,
 } from "../../src/ctf/runtime/evaluation";
+import { verifyTrustedOracleResult } from "../../src/ctf/runtime/oracle";
 
 type EvaluationSpecInput = Omit<EvaluationSpecV1, "specDigest">;
 type EvaluationPreflightInput = Omit<EvaluationPreflightV1, "preflightDigest">;
@@ -129,16 +129,34 @@ describe("local evaluation lifecycle", () => {
 		expect(destroyed).toBe(1);
 	});
 	it("does not return a candidate when session destruction fails", async () => {
+		let destroyed = 0;
 		const result = await evaluateLocalCandidate(
 			request(
 				adapter(async () => {
+					destroyed++;
 					throw new Error("secret flag /tmp/evaluation");
 				}),
 			),
 		);
-		expect(result.kind).toBe("unavailable");
+		expect(result).toMatchObject({ kind: "unavailable", sanitizedReason: "evaluation cleanup failed" });
+		expect(destroyed).toBe(1);
 		expect(JSON.stringify(result)).not.toContain("secret flag");
 		expect(JSON.stringify(result)).not.toContain("/tmp/evaluation");
+	});
+	it("fails closed when cancellation arrives during cleanup", async () => {
+		const controller = new AbortController();
+		let destroyed = 0;
+		const result = await evaluateLocalCandidate({
+			...request(
+				adapter(async () => {
+					destroyed++;
+					controller.abort();
+				}),
+			),
+			signal: controller.signal,
+		});
+		expect(result).toMatchObject({ kind: "unavailable", sanitizedReason: "evaluation cancelled" });
+		expect(destroyed).toBe(1);
 	});
 	it("creates distinct commitments for independent runs", async () => {
 		const commitments: string[] = [];

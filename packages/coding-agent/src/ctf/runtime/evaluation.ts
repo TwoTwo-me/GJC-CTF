@@ -212,7 +212,6 @@ type PublicFailureReason =
 	| "evaluation identity mismatch"
 	| "evaluation preflight failed"
 	| "trusted oracle verification is unavailable";
-class EvaluationCancelled extends Error {}
 function cancellationRequested(signal: AbortSignal | undefined): boolean {
 	return signal?.aborted === true;
 }
@@ -272,12 +271,8 @@ export async function evaluateLocalCandidate(request: LocalEvaluationRequest): P
 	const emptyDigest = sha256Hex(new Uint8Array());
 	let lineage = buildLineage(request.lineage, emptyDigest, broker.commitment());
 	const sessions: EvaluationAdapterSession[] = [];
-	let primary: EvaluationResultV1 | undefined;
-	const complete = (result: EvaluationResultV1): EvaluationResultV1 => {
-		primary = result;
-		return result;
-	};
-	try {
+	const complete = (result: EvaluationResultV1): EvaluationResultV1 => result;
+	const execute = async (): Promise<EvaluationResultV1> => {
 		try {
 			if (!preflight.passed)
 				return complete(
@@ -442,34 +437,48 @@ export async function evaluateLocalCandidate(request: LocalEvaluationRequest): P
 					cancellationRequested(request.signal) ? "evaluation cancelled" : "adapter startup failed",
 				),
 			);
-		} finally {
-			const cleanupFailures: unknown[] = [];
-			try {
-				await destroySessions(sessions);
-			} catch {
-				cleanupFailures.push(new Error("evaluation session cleanup failed"));
-			}
-			try {
-				await broker.revokeSinks();
-			} catch {
-				cleanupFailures.push(new Error("evaluation secret cleanup failed"));
-			} finally {
-				broker.destroy();
-			}
-			if (cleanupFailures.length > 0) throw new AggregateError(cleanupFailures, "evaluation cleanup failed");
-			if (cancellationRequested(request.signal) && primary?.kind !== "unavailable") throw new EvaluationCancelled();
 		}
-	} catch (error) {
-		if (error instanceof EvaluationCancelled)
-			return unavailable(
-				spec.evaluationId,
-				lineage,
-				primary?.kind === "verified" ? "verification" : "candidate",
-				"not_available",
-				"evaluation cancelled",
-			);
-		const phase = primary?.kind === "unavailable" ? primary.phase : "adapter";
-		return unavailable(spec.evaluationId, lineage, phase, "not_available", "evaluation cleanup failed");
+	};
+	let result: EvaluationResultV1;
+	try {
+		result = await execute();
+	} catch {
+		result = unavailable(
+			spec.evaluationId,
+			lineage,
+			"adapter",
+			"not_available",
+			cancellationRequested(request.signal) ? "evaluation cancelled" : "adapter startup failed",
+		);
 	}
+	const cleanupFailures: unknown[] = [];
+	try {
+		await destroySessions(sessions);
+	} catch {
+		cleanupFailures.push(new Error("evaluation session cleanup failed"));
+	}
+	try {
+		await broker.revokeSinks();
+	} catch {
+		cleanupFailures.push(new Error("evaluation secret cleanup failed"));
+	}
+	broker.destroy();
+	if (cleanupFailures.length > 0)
+		return unavailable(
+			spec.evaluationId,
+			lineage,
+			result.kind === "unavailable" ? result.phase : "adapter",
+			"not_available",
+			"evaluation cleanup failed",
+		);
+	if (cancellationRequested(request.signal) && result.kind !== "unavailable")
+		return unavailable(
+			spec.evaluationId,
+			lineage,
+			result.kind === "verified" ? "verification" : "candidate",
+			"not_available",
+			"evaluation cancelled",
+		);
+	return result;
 }
 export const runLocalEvaluation = evaluateLocalCandidate;

@@ -133,7 +133,13 @@ describe("local GJC solver backend", () => {
 				],
 			]),
 			analyzers: [
-				{ id: "ooo-recurrence", analyze: async () => (calls.push("ooo"), { status: "not-applicable" }) },
+				{
+					id: "ooo-recurrence",
+					analyze: async () => {
+						calls.push("ooo");
+						return { status: "not-applicable" };
+					},
+				},
 				{
 					id: "endians",
 					analyze: async input => {

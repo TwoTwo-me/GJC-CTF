@@ -1,11 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { ThinkingLevel } from "@gajae-code/agent-core";
 import type { AssistantMessage } from "@gajae-code/ai";
+import { canonicalDigest } from "../../src/ctf/contracts/digest";
 import { createGjcLocalSolverSessionFactory, type LocalAgentSessionFactory } from "../../src/ctf/solver/gjc-session";
 import type { LocalSolverSessionInput } from "../../src/ctf/solver/local-backend";
-import type { CreateAgentSessionOptions } from "../../src/sdk/session";
-import { canonicalDigest } from "../../src/ctf/contracts/digest";
 import { solverRouteFor } from "../../src/ctf/solver/router";
+import type { CreateAgentSessionOptions } from "../../src/sdk/session";
 
 function assistant(text: string): AssistantMessage {
 	return {

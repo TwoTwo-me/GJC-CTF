@@ -770,12 +770,9 @@ describe("benchmark contracts", () => {
 	});
 	it("accepts a valid signed run and rejects a forged per-run transition signature", () => {
 		const fixture = scoredMetricFixture();
-		const summary = summarizeMetricRuns(
-			[fixture.run],
-			fixture.input,
-			undefined,
-			{ oracleTrustAnchors: fixture.trusted.trustAnchors },
-		);
+		const summary = summarizeMetricRuns([fixture.run], fixture.input, undefined, {
+			oracleTrustAnchors: fixture.trusted.trustAnchors,
+		});
 		expect(summary.failureRuns).toBe(1);
 		const runtimeProof = fixture.run.runtimeProof;
 		if (runtimeProof === undefined) throw new Error("fixture runtime proof missing");
@@ -785,28 +782,19 @@ describe("benchmark contracts", () => {
 		};
 		expectCtfCode(
 			() =>
-				summarizeMetricRuns(
-					[forged],
-					fixture.input,
-					undefined,
-					{ oracleTrustAnchors: fixture.trusted.trustAnchors },
-				),
+				summarizeMetricRuns([forged], fixture.input, undefined, {
+					oracleTrustAnchors: fixture.trusted.trustAnchors,
+				}),
 			"oracle_integrity_error",
 		);
 	});
 	it("requires an external evaluator capability rather than request-supplied oracle roots", () => {
 		const fixture = scoredMetricFixture();
-		expectCtfCode(
-			() => summarizeMetricRuns([fixture.run], fixture.input),
-			"benchmark_provenance_missing",
-		);
+		expectCtfCode(() => summarizeMetricRuns([fixture.run], fixture.input), "benchmark_provenance_missing");
 		expect(
-			summarizeMetricRuns(
-				[fixture.run],
-				fixture.input,
-				undefined,
-				{ oracleTrustAnchors: fixture.trusted.trustAnchors },
-			).failureRuns,
+			summarizeMetricRuns([fixture.run], fixture.input, undefined, {
+				oracleTrustAnchors: fixture.trusted.trustAnchors,
+			}).failureRuns,
 		).toBe(1);
 	});
 	it("fails closed without external roots and accepts externally rooted scored preflight and reports", () => {

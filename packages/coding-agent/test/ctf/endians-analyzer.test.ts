@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { analyzeEndiansSource, createEndiansAnalyzer } from "../../src/ctf/solver/analyzers/endians";
 import { canonicalDigest } from "../../src/ctf/contracts/digest";
+import { analyzeEndiansSource, createEndiansAnalyzer } from "../../src/ctf/solver/analyzers/endians";
 import { solverRouteFor } from "../../src/ctf/solver/router";
 
 const fixtureCandidate = "lactf{synthetic-endians-fixture}";
