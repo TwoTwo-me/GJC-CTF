@@ -8,6 +8,10 @@
 - Added a tool-free production GJC AgentSession solver adapter and digest-sealed resumable local campaign controller with bounded parallel attempts, provenance-bound visible inputs, durable candidate/unknown/failure retention, cancellation, and a fixed `2026-08-09T00:00:00Z` hard stop.
 - Added a reviewed, bounded Z3 regex-grid analyzer and ordered analyzer seam for local candidate campaigns; unsupported inputs fall through to the isolated AgentSession, while derived bitmaps remain unverified candidates.
 
+### Added
+
+- Added first-class `cline-pass` and `commandcode-goat` provider presets with documented API endpoints, environment-variable credentials, non-hardcoded live model discovery from models.dev and the Command Code Provider API, and prefix-based Claude routing.
+
 ## [0.12.15] - 2026-08-06
 
 ## [0.12.14] - 2026-08-06

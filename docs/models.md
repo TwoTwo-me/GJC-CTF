@@ -162,15 +162,17 @@ providers:
       - id: anthropic.claude-3-5-sonnet-20241022-v2:0
 ```
 
-### MiniMax and GLM custom provider examples
+### Coding-plan provider presets
 
-For common MiniMax and GLM/zAI setup, prefer the provider presets so the OpenAI-compatible API, base URL, env var, model id, and compatibility flags are written together:
+For supported coding-plan providers, prefer presets so the API type, base URL, environment variable, model catalog, discovery behavior, and compatibility flags are written together:
 
 ```sh
 gjc setup provider --preset minimax
 gjc setup provider --preset minimax-cn
 gjc setup provider --preset glm
 gjc setup provider --preset alibaba-token-plan
+gjc setup provider --preset cline-pass
+gjc setup provider --preset commandcode-goat
 ```
 
 The same presets are available inside the TUI:
@@ -180,9 +182,11 @@ The same presets are available inside the TUI:
 /provider add --preset glm
 /provider add zai
 /provider add --preset alibaba-token-plan
+/provider add --preset cline-pass
+/provider add --preset commandcode-goat
 ```
 
-Presets only write `models.yml` entries that reference documented environment variable names (`MINIMAX_CODE_API_KEY`, `MINIMAX_CODE_CN_API_KEY`, `ZAI_API_KEY`, or `ALIBABA_TOKEN_PLAN_API_KEY`); they do not store or validate real credentials. The GLM preset aliases (`glm`, `zai`, `z-ai`) write an OpenAI-compatible custom provider named `glm-proxy` and do not replace the first-class `zai` provider. The Alibaba Token Plan preset (aliases: alibaba, token-plan) writes an OpenAI-compatible custom provider named alibaba-token-plan with per-model API routing (qwen3.8-max-preview uses openai-responses; glm-5.2, deepseek-v4-pro, and deepseek-v4-flash-0731 use openai-completions).
+Presets only write `models.yml` entries that reference documented environment variable names (`MINIMAX_CODE_API_KEY`, `MINIMAX_CODE_CN_API_KEY`, `ZAI_API_KEY`, `ALIBABA_TOKEN_PLAN_API_KEY`, `CLINE_API_KEY`, or `CMD_API_KEY`); they do not store or validate real credentials. The GLM preset aliases (`glm`, `zai`, `z-ai`) write an OpenAI-compatible custom provider named `glm-proxy` and do not replace the first-class `zai` provider. The Alibaba Token Plan preset (aliases: `alibaba`, `token-plan`) writes an OpenAI-compatible custom provider named `alibaba-token-plan` with per-model API routing. The ClinePass preset (aliases: `clinepass`, `cline`) does not hardcode models: Cline's inference API has no working `/models` route, so GJC follows Cline's own catalog-generation source and fetches the live `cline-pass` provider catalog from `https://models.dev/api.json`. The Command Code GOAT preset (aliases: `commandcode`, `command-code`, `goat`) fetches its live `/provider/v1/models` catalog, routes every current or future `claude-*` model through Anthropic Messages, and routes other models through Chat Completions. Create the corresponding API key in the provider dashboard before inference; plan entitlement is enforced by the provider.
 
 ## Model profiles (`--mpreset`)
 
@@ -813,7 +817,7 @@ Prompt-cache modes:
 
 Without an explicit mode, canonical Anthropic endpoints default to `automatic`, Claude-family model ids on non-canonical compatible endpoints default to `explicit`, and unknown non-Claude compatible endpoints default to `none`. Non-canonical endpoints get the default ~5m lifetime unless they opt into `supportsLongCacheRetention: true`. Set `promptCacheMode: automatic` only when a gateway is known to pass through Anthropic's top-level cache control without adding conflicting block markers.
 
-If a gateway attaches enough cache markers of its own that our generated breakpoint becomes the fifth, Anthropic rejects the request with `A maximum of 4 blocks with cache_control may be provided.` Those extra markers are not visible in the request GJC builds, so the rejection is handled at runtime rather than predicted: the turn retries once with generated caching suppressed and keeps it suppressed for the rest of the provider session. Set `promptCacheMode: none` on such a gateway to skip the wasted first attempt.
+If a gateway attaches enough cache markers of its own that ours push the request past Anthropic's four-breakpoint limit, Anthropic rejects it with `A maximum of 4 blocks with cache_control may be provided.` Those extra markers are not visible in the request GJC builds, so the limit is handled at runtime rather than predicted. Because the rejection means "too many" rather than "none allowed", recovery reduces the generated breakpoints one step at a time: `explicit` mode normally emits two markers (a conversation-prefix anchor and a current-turn refresh point), so the first retry keeps only the prefix anchor, and generated caching is disabled entirely only if that is rejected too. The reduced setting persists for the rest of the provider session, so an endpoint with one free slot keeps caching its conversation prefix instead of losing caching altogether. Set `promptCacheMode: none` on a gateway that never has a free slot to skip the wasted attempts.
 
 ```yaml
 providers:
