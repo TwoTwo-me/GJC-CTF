@@ -21,6 +21,7 @@
 ### Fixed
 - Rootless Podman CTF sessions now preserve the canonical non-root user home required to reach the verified local image store, validate that home before use, and give bounded control-plane probes enough time to start instead of making the production provider permanently unavailable.
 - Reviewed CTF solver routes now pin the provider-qualified `openai-codex/gpt-5.6-sol` identity, preventing a fuzzy `gpt-5` selector from silently choosing a different provider under the same route digest.
+- The Endians analyzer now accepts the oracle's full 4096-byte fresh-fixture secret boundary while still rejecting oversized decoded candidates and encoded inputs.
 
 ### Added
 

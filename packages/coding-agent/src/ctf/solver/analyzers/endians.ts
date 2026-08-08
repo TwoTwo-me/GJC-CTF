@@ -1,6 +1,7 @@
 import { createLocalSolverAnalyzerLifecycle, type LocalSolverAnalyzer } from "../local-backend";
 
-const MAX_SOURCE_BYTES = 4096;
+const MAX_SECRET_UTF8_BYTES = 4096;
+const MAX_ENCODED_SOURCE_BYTES = MAX_SECRET_UTF8_BYTES * 3;
 
 export type EndiansAnalysis =
 	| Readonly<{ ok: true; candidate: string; diagnostics: readonly string[] }>
@@ -31,9 +32,14 @@ function swapCodeUnits(value: string): string {
 	return output;
 }
 
-/** Decodes only the reviewed UTF-16 code-unit byte-swap puzzle form. */
+/**
+ * Decodes only the reviewed UTF-16 code-unit byte-swap puzzle form.
+ *
+ * A valid 4096-byte ASCII secret expands to three UTF-8 bytes per swapped
+ * UTF-16 code unit, so the encoded byte bound is three times the secret bound.
+ */
 export function analyzeEndiansSource(source: Uint8Array): EndiansAnalysis {
-	if (source.byteLength === 0 || source.byteLength > MAX_SOURCE_BYTES) {
+	if (source.byteLength === 0 || source.byteLength > MAX_ENCODED_SOURCE_BYTES) {
 		return {
 			ok: false,
 			reason: "source-too-large",
@@ -54,6 +60,13 @@ export function analyzeEndiansSource(source: Uint8Array): EndiansAnalysis {
 			ok: false,
 			reason: "invalid-candidate",
 			diagnostics: ["decoded value does not satisfy the visible flag framing"],
+		};
+	}
+	if (new TextEncoder().encode(candidate).byteLength > MAX_SECRET_UTF8_BYTES) {
+		return {
+			ok: false,
+			reason: "invalid-candidate",
+			diagnostics: ["decoded value exceeds the reviewed secret byte limit"],
 		};
 	}
 	if (swapCodeUnits(candidate) !== encoded) {

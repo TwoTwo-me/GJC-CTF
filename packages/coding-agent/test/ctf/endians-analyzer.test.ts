@@ -4,12 +4,17 @@ import { analyzeEndiansSource, createEndiansAnalyzer } from "../../src/ctf/solve
 import { solverRouteFor } from "../../src/ctf/solver/router";
 
 const fixtureCandidate = "lactf{synthetic-endians-fixture}";
-const source = new TextEncoder().encode(
-	Array.from(fixtureCandidate, character => {
-		const unit = character.charCodeAt(0);
-		return String.fromCharCode(((unit & 0xff) << 8) | (unit >>> 8));
-	}).join(""),
-);
+
+function encodeCandidate(candidate: string): Uint8Array {
+	return new TextEncoder().encode(
+		Array.from(candidate, character => {
+			const unit = character.charCodeAt(0);
+			return String.fromCharCode(((unit & 0xff) << 8) | (unit >>> 8));
+		}).join(""),
+	);
+}
+
+const source = encodeCandidate(fixtureCandidate);
 
 describe("Endians analyzer", () => {
 	test("decodes the reviewed visible challenge without exposing it in evidence", () => {
@@ -18,6 +23,32 @@ describe("Endians analyzer", () => {
 		if (!analysis.ok) return;
 		expect(analysis.candidate.startsWith("lactf{")).toBe(true);
 		expect(analysis.candidate.endsWith("}")).toBe(true);
+	});
+
+	test("accepts the maximum fresh-fixture ASCII payload", () => {
+		const candidate = `lactf{${"a".repeat(4096 - "lactf{}".length)}}`;
+		const encoded = encodeCandidate(candidate);
+
+		expect(encoded.byteLength).toBe(4096 * 3);
+		const analysis = analyzeEndiansSource(encoded);
+		expect(analysis.ok).toBe(true);
+		if (analysis.ok) expect(analysis.candidate).toBe(candidate);
+	});
+
+	test("refuses decoded candidates beyond the fresh-fixture secret budget", () => {
+		const candidate = `lactf{${"é".repeat(2045)}}`;
+		expect(new TextEncoder().encode(candidate).byteLength).toBeGreaterThan(4096);
+		expect(analyzeEndiansSource(encodeCandidate(candidate))).toMatchObject({
+			ok: false,
+			reason: "invalid-candidate",
+		});
+	});
+
+	test("refuses encoded input beyond the fresh-fixture bound", () => {
+		expect(analyzeEndiansSource(new Uint8Array(4096 * 3 + 1))).toMatchObject({
+			ok: false,
+			reason: "source-too-large",
+		});
 	});
 
 	test("fails closed for malformed input", () => {
