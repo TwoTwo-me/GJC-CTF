@@ -373,7 +373,7 @@ Gajae-Code includes a [`geobench`](https://github.com/NomaDamas/geobench) produc
 - Runbook: [`docs/geobench.md`](docs/geobench.md)
 ## CTF operator workflow
 
-The supported source command is `bun packages/coding-agent/bin/gjc-ctf.js`. The local, unscored LA CTF corpus is pinned to [`uclaacm/lactf-archive`](https://github.com/uclaacm/lactf-archive) commit `3379d4a7b36680764a34e7dc817cc3c94c244764`. It contains a first misc/reverse tier and a locked crypto/pwn/web tier; the latter expands only after every eligible active-tier challenge has an independently signed verified solve. The harness does **not** solve every challenge.
+The supported source command is `bun packages/coding-agent/bin/gjc-ctf.js`. The full setup, authority, evidence, and troubleshooting procedure is in [`docs/ctf-harness.md`](docs/ctf-harness.md). The local, unscored LA CTF corpus is pinned to [`uclaacm/lactf-archive`](https://github.com/uclaacm/lactf-archive) commit `3379d4a7b36680764a34e7dc817cc3c94c244764`. It contains a first misc/reverse tier and a locked crypto/pwn/web tier; the latter expands only after every eligible active-tier challenge has an independently signed verified solve. The harness does **not** solve every challenge.
 
 ```sh
 # Inspect the reviewed tool allowlist without changing the VM.
