@@ -20,9 +20,10 @@ import {
 	type OperationalLimitsV1,
 	type SafetyMaximaV1,
 } from "../../packages/coding-agent/src/ctf/contracts/sandbox";
-import { oracleEntryDigest, oracleRegistryDigest } from "../../packages/coding-agent/src/ctf/contracts/oracle";
+import { oracleEntryDigest, oracleRegistryDigest, type OracleTrustAnchorsV1 } from "../../packages/coding-agent/src/ctf/contracts/oracle";
 import { CtfError } from "../../packages/coding-agent/src/ctf/contracts/errors";
 import {
+	validateAnchoredOracleRegistry,
 	validateTrustedOracleRegistry,
 	type TrustedOracleRegistry,
 } from "../../packages/coding-agent/src/ctf/runtime/oracle";
@@ -74,6 +75,10 @@ export type BenchmarkOracleProofContext = Readonly<{
 	challengeId: string;
 	before?: unknown;
 	after: unknown;
+}>;
+export type BenchmarkEvaluatorCapability = Readonly<{
+	/** Operator-owned roots supplied outside the benchmark evidence request. */
+	oracleTrustAnchors: OracleTrustAnchorsV1;
 }>;
 
 export type BenchmarkPreflightRequest = Readonly<{
@@ -541,7 +546,10 @@ function validateBenchmarkConcreteLineage(
  * calibration, oracle, or safety provenance is a typed rejection; no local
  * default is substituted.
  */
-export function preflightBenchmark(request: BenchmarkPreflightRequest): BenchmarkPreflight {
+export function preflightBenchmark(
+	request: BenchmarkPreflightRequest,
+	evaluatorCapability?: BenchmarkEvaluatorCapability,
+): BenchmarkPreflight {
 	if (!request || typeof request !== "object") reject("benchmark_provenance_missing", "benchmark preflight request is missing");
 	const manifest = validateBenchmarkManifest(request.manifest);
 	const lock = validateBenchmarkLock(request.lock);
@@ -574,9 +582,16 @@ export function preflightBenchmark(request: BenchmarkPreflightRequest): Benchmar
 		reject("uncalibrated_limits", "benchmark calibration must carry explicit digest-bound denominator and thresholds");
 	}
 	validateBenchmarkOracle(manifest, lock, request.oracle);
-	const trustedOracle = validateTrustedOracleRegistry(
-		request.oracle.trustedRegistry ?? request.oracle.oracleRegistry ?? request.oracle.registry,
-	);
+	let trustedOracle: TrustedOracleRegistry;
+	try {
+		const trustAnchors = evaluatorCapability?.oracleTrustAnchors;
+		trustedOracle = validateAnchoredOracleRegistry(
+			request.oracle.trustedRegistry ?? request.oracle.oracleRegistry ?? request.oracle.registry,
+			trustAnchors,
+		);
+	} catch {
+		reject("oracle_integrity_error", "scored benchmark preflight requires externally anchored oracle authority");
+	}
 	validateSignedBenchmarkEvidence(request, manifest, lock, trustedOracle);
 	if (!isDigest(request.safetyPolicyDigest) || !digestsEqual(request.safetyPolicyDigest, manifest.safetyPolicyDigest)) {
 		reject("benchmark_provenance_missing", "benchmark safety policy provenance does not match the manifest");

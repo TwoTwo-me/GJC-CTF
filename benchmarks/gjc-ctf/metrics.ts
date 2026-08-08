@@ -14,6 +14,7 @@ import {
 	benchmarkEligibleChallengeIds,
 	benchmarkEligibleDenominator,
 	verifyBenchmarkOracleTransitionProof,
+	type BenchmarkEvaluatorCapability,
 	type BenchmarkOracleProofContext,
 } from "./manifest";
 import {
@@ -182,6 +183,7 @@ type MetricInputValidation = Readonly<{
 function concreteBenchmarkAuthorities(
 	options: Record<string, unknown>,
 	manifest: BenchmarkManifestV1,
+	evaluatorCapability: BenchmarkEvaluatorCapability | undefined,
 ): Pick<BenchmarkMetricAuthority, "skill" | "limits" | "safety" | "oracle"> & { effectiveSkillDigest: Digest } {
 	const rawSkill = options.effectiveSkill ?? options.skill;
 	if (rawSkill === undefined) {
@@ -231,19 +233,19 @@ function concreteBenchmarkAuthorities(
 	const registryInput = rawOracle && typeof rawOracle === "object" && !Array.isArray(rawOracle)
 		? ((rawOracle as Record<string, unknown>).trustedRegistry ?? (rawOracle as Record<string, unknown>).oracleRegistry ?? (rawOracle as Record<string, unknown>).registry ?? rawOracle)
 		: rawOracle;
-	const trustAnchors = rawOracle && typeof rawOracle === "object" && !Array.isArray(rawOracle)
-		? (rawOracle as Record<string, unknown>).trustAnchors
-		: undefined;
-	if (registryInput === undefined || trustAnchors === undefined) {
-		rejectMetric("benchmark_provenance_missing", "scored benchmark runs require an externally anchored oracle registry");
+	if (registryInput === undefined || evaluatorCapability?.oracleTrustAnchors === undefined) {
+		rejectMetric("benchmark_provenance_missing", "scored benchmark runs require externally anchored oracle authority");
 	}
-	const oracle = validateAnchoredOracleRegistry(registryInput, trustAnchors);
+	const oracle = validateAnchoredOracleRegistry(registryInput, evaluatorCapability.oracleTrustAnchors);
 	if (oracle.registry.registryDigest !== manifest.oracleRegistryDigest) {
 		rejectMetric("benchmark_lock_mismatch", "trusted oracle registry does not match the benchmark manifest");
 	}
 	return { skill, limits, safety, oracle, effectiveSkillDigest };
 }
-function benchmarkMetricAuthority(options: Record<string, unknown> | undefined): BenchmarkMetricAuthority | undefined {
+function benchmarkMetricAuthority(
+	options: Record<string, unknown> | undefined,
+	evaluatorCapability: BenchmarkEvaluatorCapability | undefined,
+): BenchmarkMetricAuthority | undefined {
 	const rawManifest = options?.manifest;
 	const rawLock = options?.lock;
 	if (rawManifest === undefined && rawLock === undefined) return undefined;
@@ -268,7 +270,7 @@ function benchmarkMetricAuthority(options: Record<string, unknown> | undefined):
 	if (categories.size !== eligibleChallengeIds.length) {
 		rejectMetric("benchmark_provenance_missing", "metric benchmark eligible challenge categories are incomplete");
 	}
-	const concrete = concreteBenchmarkAuthorities(options ?? {}, manifest);
+	const concrete = concreteBenchmarkAuthorities(options ?? {}, manifest, evaluatorCapability);
 	const oraclePins = new Map(
 		manifest.corpus
 			.filter(entry => eligibleSet.has(entry.challengeId))
@@ -472,6 +474,7 @@ function validateSignedRunEvidence(run: MetricRunRecord, authority: BenchmarkMet
 function validateMetricInputs(
 	input: unknown,
 	explicitCalibration?: unknown,
+	evaluatorCapability?: BenchmarkEvaluatorCapability,
 ): MetricInputValidation {
 	const options = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : undefined;
 	const authority = options !== undefined &&
@@ -480,7 +483,7 @@ function validateMetricInputs(
 			options.operationalLimits !== undefined ||
 			options.limits !== undefined ||
 			options.oracle !== undefined)
-		? benchmarkMetricAuthority(options)
+		? benchmarkMetricAuthority(options, evaluatorCapability)
 		: undefined;
 	const calibrationInput = options?.calibration ?? explicitCalibration;
 	const calibration = validateBenchmarkCalibration(calibrationInput, { requireBenchmark: true });
@@ -619,8 +622,9 @@ export function summarizeMetricRuns(
 	runs: readonly MetricRunRecord[],
 	input?: unknown,
 	explicitCalibration?: BenchmarkCalibrationPolicy,
+	evaluatorCapability?: BenchmarkEvaluatorCapability,
 ): DeterministicMetricSummary {
-	const metricInput = validateMetricInputs(input, explicitCalibration);
+	const metricInput = validateMetricInputs(input, explicitCalibration, evaluatorCapability);
 	for (const run of runs) validateMetricRun(run, metricInput.authority, metricInput.calibration);
 	const groups = challengeGroups(runs);
 	if (metricInput.challengeIds && [...groups.keys()].some((challengeId: string) => !metricInput.challengeIds?.includes(challengeId))) {
@@ -763,7 +767,10 @@ function validateSignedBenchmarkEvidenceForReport(
  * digest-bound calibration, manifest-derived denominator and IDs,
  * known outcomes for every run.
  */
-export function evaluateBenchmarkResult(request: unknown): BenchmarkResult {
+export function evaluateBenchmarkResult(
+	request: unknown,
+	evaluatorCapability?: BenchmarkEvaluatorCapability,
+): BenchmarkResult {
 	try {
 		if (!request || typeof request !== "object" || Array.isArray(request)) {
 			return { status: "unavailable", reason: "benchmark result request is missing" };
@@ -772,7 +779,7 @@ export function evaluateBenchmarkResult(request: unknown): BenchmarkResult {
 		const manifest = validateBenchmarkManifest(value.manifest);
 		const lock = validateBenchmarkLock(value.lock);
 		assertBenchmarkLockMatchesManifest(lock, manifest);
-		const authority = benchmarkMetricAuthority(value);
+		const authority = benchmarkMetricAuthority(value, evaluatorCapability);
 		if (authority === undefined) return { status: "unavailable", reason: "benchmark result benchmark authority is missing" };
 		const calibration = validateBenchmarkCalibration(value.calibration, { requireBenchmark: true });
 		if (calibration.calibrationId !== manifest.calibrationId || calibration.operationalLimitsDigest !== manifest.operationalLimitsDigest) {
@@ -832,7 +839,7 @@ export function evaluateBenchmarkResult(request: unknown): BenchmarkResult {
 			eligibleChallengeIds: authority.eligibleChallengeIds,
 			calibration,
 			objective: manifest.objective,
-		});
+		}, undefined, evaluatorCapability);
 		if (value.achievedPassCount !== summary.achievedPassCount) {
 			return { status: "unavailable", reason: "benchmark result achieved pass count is not derived from validated runs" };
 		}
@@ -853,8 +860,11 @@ export function evaluateBenchmarkResult(request: unknown): BenchmarkResult {
 }
 
 /** Throwing form for integrations that need a hard stop before publication. */
-export function validateBenchmarkResult(request: unknown): Extract<BenchmarkResult, { status: "ready" }> {
-	const result = evaluateBenchmarkResult(request);
+export function validateBenchmarkResult(
+	request: unknown,
+	evaluatorCapability?: BenchmarkEvaluatorCapability,
+): Extract<BenchmarkResult, { status: "ready" }> {
+	const result = evaluateBenchmarkResult(request, evaluatorCapability);
 	if (result.status !== "ready") rejectMetric("benchmark_provenance_missing", result.reason);
 	return result;
 }
@@ -893,7 +903,10 @@ export type BenchmarkReportRequest = Readonly<{
  * lineage. Invalid or incomplete reports remain unavailable and never receive
  * synthetic metrics.
  */
-export function evaluateBenchmarkReport(request: unknown): BenchmarkReportResult {
+export function evaluateBenchmarkReport(
+	request: unknown,
+	evaluatorCapability?: BenchmarkEvaluatorCapability,
+): BenchmarkReportResult {
 	try {
 		if (!request || typeof request !== "object" || Array.isArray(request)) {
 			return { status: "unavailable", reason: "benchmark report request is missing" };
@@ -902,7 +915,7 @@ export function evaluateBenchmarkReport(request: unknown): BenchmarkReportResult
 		const manifest = validateBenchmarkManifest(value.manifest);
 		const lock = validateBenchmarkLock(value.lock);
 		assertBenchmarkLockMatchesManifest(lock, manifest);
-		const authority = benchmarkMetricAuthority(value);
+		const authority = benchmarkMetricAuthority(value, evaluatorCapability);
 		if (authority === undefined) return { status: "unavailable", reason: "benchmark report benchmark authority is missing" };
 		const calibration = validateBenchmarkCalibration(value.calibration, { requireBenchmark: true });
 		if (
@@ -1004,7 +1017,7 @@ export function evaluateBenchmarkReport(request: unknown): BenchmarkReportResult
 			eligibleChallengeIds,
 			calibration,
 			objective: manifest.objective,
-		});
+		}, undefined, evaluatorCapability);
 		const knownMetric = (metric: MetricValue<number>): number | null => metric.status === "known" ? metric.value : null;
 		if (
 			report.passAt1 !== knownMetric(summary.passAt1) ||
@@ -1070,8 +1083,11 @@ export function evaluateBenchmarkReport(request: unknown): BenchmarkReportResult
 	}
 }
 
-export function validateBenchmarkReport(request: BenchmarkReportRequest): MetricsReportV1 {
-	const result = evaluateBenchmarkReport(request);
+export function validateBenchmarkReport(
+	request: BenchmarkReportRequest,
+	evaluatorCapability?: BenchmarkEvaluatorCapability,
+): MetricsReportV1 {
+	const result = evaluateBenchmarkReport(request, evaluatorCapability);
 	if (result.status !== "ready") rejectMetric("benchmark_provenance_missing", result.reason);
 	return result.report;
 }

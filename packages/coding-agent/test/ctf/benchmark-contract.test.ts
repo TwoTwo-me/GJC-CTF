@@ -18,6 +18,7 @@ import {
 	summarizeMetricRuns,
 } from "../../../../benchmarks/gjc-ctf/metrics";
 import { runDeterministicFixtureBenchmark } from "../../../../benchmarks/gjc-ctf/repeat-runner";
+import { authorizedVersionStatsRequest } from "../../../../benchmarks/gjc-ctf/test-authority-fixture";
 import {
 	type BenchmarkCorpusEntry,
 	type BenchmarkManifestV1,
@@ -769,7 +770,12 @@ describe("benchmark contracts", () => {
 	});
 	it("accepts a valid signed run and rejects a forged per-run transition signature", () => {
 		const fixture = scoredMetricFixture();
-		const summary = summarizeMetricRuns([fixture.run], fixture.input);
+		const summary = summarizeMetricRuns(
+			[fixture.run],
+			fixture.input,
+			undefined,
+			{ oracleTrustAnchors: fixture.trusted.trustAnchors },
+		);
 		expect(summary.failureRuns).toBe(1);
 		const runtimeProof = fixture.run.runtimeProof;
 		if (runtimeProof === undefined) throw new Error("fixture runtime proof missing");
@@ -777,7 +783,39 @@ describe("benchmark contracts", () => {
 			...fixture.run,
 			runtimeProof: { ...runtimeProof, signature: "forged" },
 		};
-		expectCtfCode(() => summarizeMetricRuns([forged], fixture.input), "oracle_integrity_error");
+		expectCtfCode(
+			() =>
+				summarizeMetricRuns(
+					[forged],
+					fixture.input,
+					undefined,
+					{ oracleTrustAnchors: fixture.trusted.trustAnchors },
+				),
+			"oracle_integrity_error",
+		);
+	});
+	it("requires an external evaluator capability rather than request-supplied oracle roots", () => {
+		const fixture = scoredMetricFixture();
+		expectCtfCode(
+			() => summarizeMetricRuns([fixture.run], fixture.input),
+			"benchmark_provenance_missing",
+		);
+		expect(
+			summarizeMetricRuns(
+				[fixture.run],
+				fixture.input,
+				undefined,
+				{ oracleTrustAnchors: fixture.trusted.trustAnchors },
+			).failureRuns,
+		).toBe(1);
+	});
+	it("fails closed without external roots and accepts externally rooted scored preflight and reports", () => {
+		const fixture = authorizedVersionStatsRequest();
+		const capability = { oracleTrustAnchors: fixture.oracle.trustAnchors };
+		expectCtfCode(() => preflightBenchmark(fixture), "oracle_integrity_error");
+		expect(() => preflightBenchmark(fixture, capability)).not.toThrow();
+		expect(evaluateBenchmarkReport(fixture).status).toBe("unavailable");
+		expect(evaluateBenchmarkReport(fixture, capability).status).toBe("ready");
 	});
 	it("binds every challenge repeat to a canonical schedule, including colon IDs", () => {
 		expect(benchmarkRepeatSeed("bench:a", "challenge", 0)).not.toBe(benchmarkRepeatSeed("bench", "a:challenge", 0));

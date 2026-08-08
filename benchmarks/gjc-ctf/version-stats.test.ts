@@ -106,11 +106,13 @@ describe("version statistics", () => {
 		const authority = authorizedVersionStatsRequest();
 		const baseline = authority;
 		const candidate = baseline;
-		const baselineResult = computeVersionStats(baseline);
+		const evaluatorCapability = { oracleTrustAnchors: authority.oracle.trustAnchors };
+		expect(computeVersionStats(baseline)).toMatchObject({ status: "unavailable" });
+		const baselineResult = computeVersionStats(baseline, evaluatorCapability);
 		expect(baselineResult).toMatchObject({ status: "ready" });
 		if (baselineResult.status !== "ready") throw new Error(baselineResult.reason);
 		expect(baselineResult.stats.identity).toEqual(baseline.identity);
-		const comparison = compareVersionStats(baseline, candidate);
+		const comparison = compareVersionStats(baseline, candidate, evaluatorCapability);
 		expect(comparison).toMatchObject({ status: "comparable", deltas: { failureCount: { status: "known", value: 0 } } });
 	});
 	test("rejects harness and toolchain lineage drift", () => {

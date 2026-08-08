@@ -6,6 +6,7 @@ import { nearestRank, passAtK, validateMetricsReport, type MetricRunRecord, type
 import { validateBenchmarkLock, validateBenchmarkManifest } from "../../packages/coding-agent/src/ctf/contracts/benchmark";
 import { validateBenchmarkCalibration } from "../../packages/coding-agent/src/ctf/runtime/policy";
 import { evaluateBenchmarkReport, type BenchmarkReportRequest } from "./metrics";
+import type { BenchmarkEvaluatorCapability } from "./manifest";
 
 const UnknownValueSchema = z.object({ status: z.literal("unknown"), reason: z.string().min(1) }).strict();
 const KnownValueSchema = <T extends z.ZodType>(value: T) => z.object({ status: z.literal("known"), value }).strict();
@@ -171,11 +172,14 @@ function assertProductionIdentity(identity: VersionStatsIdentity, request: Recor
 		throw new CtfError("benchmark_lock_mismatch", "version statistics identity is not bound to authorized benchmark authority");
 	}
 }
-export function computeVersionStats(request: unknown): VersionStatsResult {
+export function computeVersionStats(
+	request: unknown,
+	evaluatorCapability?: BenchmarkEvaluatorCapability,
+): VersionStatsResult {
 	if (!request || typeof request !== "object" || Array.isArray(request)) {
 		return { status: "unavailable", reason: "version statistics request is missing" };
 	}
-	const evaluated = evaluateBenchmarkReport(request);
+	const evaluated = evaluateBenchmarkReport(request, evaluatorCapability);
 	if (evaluated.status !== "ready") return evaluated;
 	const identity = VersionStatsIdentitySchema.safeParse((request as Record<string, unknown>).identity);
 	if (!identity.success) return { status: "unavailable", reason: "version statistics identity is invalid" };
@@ -290,10 +294,14 @@ function compareAuthorizedVersionStats(baselineValue: unknown, candidateValue: u
 		statusTransitions,
 	};
 }
-export function compareVersionStats(baselineRequest: unknown, candidateRequest: unknown): VersionComparison {
-	const baseline = computeVersionStats(baselineRequest);
+export function compareVersionStats(
+	baselineRequest: unknown,
+	candidateRequest: unknown,
+	evaluatorCapability?: BenchmarkEvaluatorCapability,
+): VersionComparison {
+	const baseline = computeVersionStats(baselineRequest, evaluatorCapability);
 	if (baseline.status !== "ready") return { status: "unavailable", reason: `baseline: ${baseline.reason}` };
-	const candidate = computeVersionStats(candidateRequest);
+	const candidate = computeVersionStats(candidateRequest, evaluatorCapability);
 	if (candidate.status !== "ready") return { status: "unavailable", reason: `candidate: ${candidate.reason}` };
 	return compareAuthorizedVersionStats(baseline.stats, candidate.stats);
 }

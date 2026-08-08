@@ -368,7 +368,9 @@ export class LactfTierController {
 		return this.store.withLock(this.path, async () => {
 			const current = (await this.readPersisted()) ?? initialState(this.authority);
 			if (this.authority === undefined || !requestMatchesAuthority(request, this.authority[current.activeTier]!)) return current;
-			const evaluated = evaluateBenchmarkReport(request);
+			const evaluated = evaluateBenchmarkReport(request, {
+				oracleTrustAnchors: this.authority[current.activeTier]!.oracleTrustAnchors,
+			});
 			if (evaluated.status !== "ready") return current;
 			const activeIds = tierIds(current.activeTier);
 			if (!sameIds(evaluated.report.eligibleChallengeIds ?? [], activeIds)) return current;
