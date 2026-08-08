@@ -609,6 +609,18 @@ function createLocalCtfSolverBackendForRoutes(
 					if (existingArtifact !== undefined)
 						return { status: "blocked", reason: "run artifact identity already exists" };
 					const visibleFiles = await readVisible(visibleRoot, descriptor, materialized.visibleFileDigests);
+					const evaluationMaterialization = Object.freeze({
+						provenanceDigest: materialized.provenanceDigest,
+						visibleFiles: Object.freeze(
+							visibleFiles.map(file =>
+								Object.freeze({
+									path: file.path,
+									digest: materialized.visibleFileDigests![file.path]!,
+									content: new Uint8Array(file.content),
+								}),
+							),
+						),
+					});
 					const toolProfile = Object.freeze([...allowedTools]);
 					const inputBase: Omit<LocalSolverSessionInput, "attempt" | "retryFeedback" | "runCapability"> = {
 						challengeId: request.challengeId,
@@ -787,6 +799,7 @@ function createLocalCtfSolverBackendForRoutes(
 										fencingToken: request.authority.fencingToken,
 									}),
 									acquisition,
+									evaluationMaterialization,
 								);
 								run.evaluationAdapter = evaluationAdapter;
 								if (controller.signal.aborted)

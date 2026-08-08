@@ -601,6 +601,7 @@ describe("local GJC solver backend", () => {
 		const controller = new AbortController();
 		const route = solverRouteFor("lactf-2026-pwn-tic-tac-no");
 		let sessionCreations = 0;
+		let openedMaterialization: unknown;
 		const backend = createLocalCtfSolverBackend({
 			root,
 			artifactRoot,
@@ -615,15 +616,18 @@ describe("local GJC solver backend", () => {
 					challengeId: route.challengeId,
 					routeDigest: route.routeDigest,
 					adapterKind: "process-service",
-					open: () => ({
-						service: Promise.resolve({
-							send: async () => {},
-							receive: async () => new Uint8Array(),
-							restart: async () => {},
-							close: async () => controller.abort("cancelled during adapter cleanup"),
-						}),
-						terminate: async () => {},
-					}),
+					open: input => {
+						openedMaterialization = input.materialization;
+						return {
+							service: Promise.resolve({
+								send: async () => {},
+								receive: async () => new Uint8Array(),
+								restart: async () => {},
+								close: async () => controller.abort("cancelled during adapter cleanup"),
+							}),
+							terminate: async () => {},
+						};
+					},
 				},
 			],
 			createSession: () => {
@@ -636,6 +640,12 @@ describe("local GJC solver backend", () => {
 			backend.solve({ ...request("lactf-2026-pwn-tic-tac-no", root), signal: controller.signal }),
 		).resolves.toMatchObject({ status: "cancelled" });
 		expect(sessionCreations).toBe(1);
+		expect(openedMaterialization).toMatchObject({
+			provenanceDigest: sha256Hex("materialized"),
+			visibleFiles: [
+				{ path: "answer.txt", digest: sha256Hex("visible"), content: new Uint8Array(Buffer.from("visible")) },
+			],
+		});
 	});
 	it("fails closed when evaluation adapter cleanup does not quiesce", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));

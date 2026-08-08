@@ -14,6 +14,10 @@ type AdapterIdentity = Readonly<{
 	adapterKind: InteractiveAdapterKind;
 }>;
 
+export type LocalEvaluationMaterializationView = Readonly<{
+	provenanceDigest: string;
+	visibleFiles: readonly Readonly<{ path: string; digest: string; content: Uint8Array }>[];
+}>;
 export type LocalEvaluationRunBinding = Readonly<{
 	competitionId: string;
 	runId: string;
@@ -105,6 +109,7 @@ export type LocalEvaluationAdapterProvider = AdapterIdentity &
 				signal: AbortSignal;
 				attemptLimits: SolverAttemptLimits;
 				binding: LocalEvaluationRunBinding;
+				materialization?: LocalEvaluationMaterializationView;
 			}>,
 		): LocalEvaluationAcquisition;
 	}>;
@@ -206,6 +211,7 @@ export async function openLocalEvaluationAdapter(
 	signal: AbortSignal,
 	binding: LocalEvaluationRunBinding,
 	lifecycle?: LocalEvaluationAdapterLifecycle,
+	materialization?: LocalEvaluationMaterializationView,
 ): Promise<LocalEvaluationAdapter> {
 	if (!isInteractiveKind(route.adapterKind)) throw new Error("offline routes do not use local evaluation adapters");
 	if (
@@ -229,6 +235,7 @@ export async function openLocalEvaluationAdapter(
 			signal: controller.signal,
 			attemptLimits: route.attemptLimits,
 			binding: Object.freeze({ ...binding }),
+			materialization,
 		});
 	} catch {
 		signal.removeEventListener("abort", abort);
