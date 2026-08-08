@@ -136,6 +136,6 @@ This repository has no external permission record, trusted independent oracle re
 
 - [Benchmark](benchmark.md) — lock identity, tier gate, and versioned statistics.
 - [Metrics](metrics.md) — validated outcomes and comparisons.
-- [Skill and lock identity](skill.md) — signed training/holdout promotion.
+- [Skill and lock identity](skill.md) — blinded training and one-look holdout promotion.
 - [CLI](cli.md) — implemented command details and unavailable commands.
 - [Safety](safety.md) — clean-room and policy limits.
