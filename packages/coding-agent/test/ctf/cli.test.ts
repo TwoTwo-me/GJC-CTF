@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { rm } from "node:fs/promises";
 import {
+	projectLactfVersionStatisticsInspection,
+	validateLactfVersionStatisticsArtifact,
+} from "@gajae-code/coding-agent/ctf/evidence/version-observation";
+import {
 	CTF_DASHBOARD_EMBEDDED_ARCHIVE,
 	parseBootstrapCommandArgs,
 	parseCtfArgv,
@@ -96,11 +100,30 @@ describe("gjc-ctf stats inspect CLI surface", () => {
 			json: true,
 		});
 		expect(() => parseCtfArgv(["stats", "write"])).toThrow(/Expected "stats inspect"/u);
-		expect(() => parseStatsInspectCommandArgs([])).toThrow(/Missing required --input/u);
-		expect(() => parseStatsInspectCommandArgs(["--input", "a", "--input", "b"])).toThrow(/only once/u);
-		expect(() => parseStatsInspectCommandArgs(["--input", "a", "--json", "--json"])).toThrow(/only once/u);
-		expect(() => parseStatsInspectCommandArgs(["--input", "a", "--seal"])).toThrow(/Unknown stats inspect argument/u);
+		expect(() => parseStatsInspectCommandArgs([])).toThrow("Stats inspection arguments are invalid.");
+		expect(() => parseStatsInspectCommandArgs(["--input", "a", "--input", "b"])).toThrow(
+			"Stats inspection arguments are invalid.",
+		);
+		expect(() => parseStatsInspectCommandArgs(["--input", "a", "--json", "--json"])).toThrow(
+			"Stats inspection arguments are invalid.",
+		);
+		expect(() => parseStatsInspectCommandArgs(["--input", "a", "--seal"])).toThrow(
+			"Stats inspection arguments are invalid.",
+		);
 		expect(renderCtfHelp()).toContain("stats inspect --input PATH [--json]");
+	});
+	test("exposes the validator and candidate-free projection through the package subpath", async () => {
+		const observation = validateLactfVersionStatisticsArtifact(await Bun.file(VERSION_OBSERVATION_PATH).json());
+		expect(projectLactfVersionStatisticsInspection(observation)).toEqual({
+			schemaVersion: "gjc-ctf-stats-inspection-1",
+			versionsInspected: expect.any(Number),
+			independentlyVerifiedSolveCount: 0,
+			status: "unscored",
+			comparisonStatus: "unavailable",
+			comparable: false,
+			tier2Authorized: false,
+			limitationsRecorded: expect.any(Number),
+		});
 	});
 
 	test("renders only validated diagnostic observation fields as JSON or candidate-free text", async () => {
@@ -117,10 +140,56 @@ describe("gjc-ctf stats inspect CLI surface", () => {
 		const json = await captureCliOutput(["stats", "inspect", "--input", VERSION_OBSERVATION_PATH, "--json"]);
 		expect(json.stderr).toBe("");
 		expect(json.exitCode).toBe(0);
-		expect(JSON.parse(json.stdout)).toMatchObject({
-			schemaVersion: "gjc-ctf-version-observation-2",
-			comparison: { benchmarkStatus: "unavailable", comparable: false },
+		const inspection = JSON.parse(json.stdout) as Record<string, unknown>;
+		expect(Object.keys(inspection).sort()).toEqual([
+			"comparable",
+			"comparisonStatus",
+			"independentlyVerifiedSolveCount",
+			"limitationsRecorded",
+			"schemaVersion",
+			"status",
+			"tier2Authorized",
+			"versionsInspected",
+		]);
+		expect(inspection).toEqual({
+			schemaVersion: "gjc-ctf-stats-inspection-1",
+			versionsInspected: expect.any(Number),
+			independentlyVerifiedSolveCount: 0,
+			status: "unscored",
+			comparisonStatus: "unavailable",
+			comparable: false,
+			tier2Authorized: false,
+			limitationsRecorded: expect.any(Number),
 		});
+	});
+	test("uses constant non-reflective grammar errors in text and JSON output", async () => {
+		const sentinel = "stats-grammar-sentinel-do-not-emit";
+		const text = await captureCliOutput(["stats", "inspect", "--input", VERSION_OBSERVATION_PATH, sentinel]);
+		expect(text.exitCode).toBe(2);
+		expect(text.stdout).not.toContain(sentinel);
+		expect(text.stderr).toContain("Stats inspection arguments are invalid.");
+		expect(text.stderr).not.toContain(sentinel);
+		const json = await captureCliOutput([
+			"stats",
+			"inspect",
+			"--input",
+			VERSION_OBSERVATION_PATH,
+			sentinel,
+			"--json",
+		]);
+		expect(json.exitCode).toBe(2);
+		expect(json.stderr).toBe("");
+		expect(json.stdout).toBe(
+			`${JSON.stringify({
+				schemaVersion: "ctf-api-1",
+				error: {
+					code: "invalid_api_request",
+					message: "Stats inspection arguments are invalid.",
+					retryable: false,
+				},
+			})}\n`,
+		);
+		expect(json.stdout).not.toContain(sentinel);
 	});
 
 	test("rejects malformed, wrong-schema, revoked, extra, digest-mismatched, and self-sealed inputs without partial output", async () => {

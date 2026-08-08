@@ -1,5 +1,8 @@
 export {
 	LactfVersionObservationV2Schema,
+	LactfVersionStatisticsInspectionSchema,
+	projectLactfVersionStatisticsInspection,
 	validateLactfVersionStatisticsArtifact,
 	type LactfVersionObservationV2,
-} from "../../packages/coding-agent/src/ctf/evidence/version-observation";
+	type LactfVersionStatisticsInspection,
+} from "@gajae-code/coding-agent/ctf/evidence/version-observation";

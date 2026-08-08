@@ -13,7 +13,11 @@ import { CtfError, errorEnvelope } from "./contracts/errors";
 import embeddedDashboardArchive from "./dashboard/embedded-client.generated.txt" with { type: "text" };
 import { createCtfWorkspaceDashboardProjectionReader, readCtfDashboardSnapshot } from "./dashboard/projection-reader";
 import { startCtfDashboard } from "./dashboard/server";
-import { validateLactfVersionStatisticsArtifact } from "./evidence/version-observation";
+import {
+	type LactfVersionStatisticsInspection,
+	projectLactfVersionStatisticsInspection,
+	validateLactfVersionStatisticsArtifact,
+} from "./evidence/version-observation";
 import {
 	type CtfRunMode,
 	createUnavailableRun,
@@ -156,38 +160,40 @@ function requiredUniqueFlag(args: readonly string[], name: string): string {
 function wantsJson(args: readonly string[]): boolean {
 	return args.includes("--json");
 }
+const STATS_INSPECT_ARGUMENT_ERROR = "Stats inspection arguments are invalid.";
+
 export function parseStatsInspectCommandArgs(args: readonly string[]): Readonly<{ input: string; json: boolean }> {
 	let input: string | undefined;
 	let json = false;
 	for (let index = 0; index < args.length; index += 1) {
 		const argument = args[index];
 		if (argument === "--input") {
-			if (input !== undefined) throw new CtfUsageError("--input may be specified only once.");
+			if (input !== undefined) throw new CtfUsageError(STATS_INSPECT_ARGUMENT_ERROR);
 			const path = args[++index];
-			if (!path || path.startsWith("--")) throw new CtfUsageError("Missing required --input.");
+			if (!path || path.startsWith("--")) throw new CtfUsageError(STATS_INSPECT_ARGUMENT_ERROR);
 			input = path;
 			continue;
 		}
 		if (argument === "--json") {
-			if (json) throw new CtfUsageError("--json may be specified only once.");
+			if (json) throw new CtfUsageError(STATS_INSPECT_ARGUMENT_ERROR);
 			json = true;
 			continue;
 		}
-		throw new CtfUsageError(`Unknown stats inspect argument "${argument ?? ""}".`);
+		throw new CtfUsageError(STATS_INSPECT_ARGUMENT_ERROR);
 	}
-	if (input === undefined) throw new CtfUsageError("Missing required --input.");
+	if (input === undefined) throw new CtfUsageError(STATS_INSPECT_ARGUMENT_ERROR);
 	return { input, json };
 }
 
-function renderStatsInspection(observation: ReturnType<typeof validateLactfVersionStatisticsArtifact>): string {
+function renderStatsInspection(inspection: LactfVersionStatisticsInspection): string {
 	return `${[
 		"LA CTF version statistics inspection",
-		`Versions inspected: ${observation.versions.length}`,
+		`Versions inspected: ${inspection.versionsInspected}`,
 		"Independently verified solves: 0",
 		"Status: unscored diagnostic observation",
 		"Comparison: unavailable",
 		"Tier 2: unauthorized",
-		`Limitations: ${observation.limitations.length} recorded; no benchmark comparison is available.`,
+		`Limitations: ${inspection.limitationsRecorded} recorded; no benchmark comparison is available.`,
 	].join("\n")}\n`;
 }
 const BOOTSTRAP_CATEGORIES = [
@@ -411,7 +417,8 @@ async function runCommand(command: CtfCommand, args: readonly string[], runtime:
 		} catch {
 			throw new CtfUsageError("Stats inspection input is not a valid active v2 diagnostic observation.");
 		}
-		process.stdout.write(parsed.json ? `${JSON.stringify(observation)}\n` : renderStatsInspection(observation));
+		const inspection = projectLactfVersionStatisticsInspection(observation);
+		process.stdout.write(parsed.json ? `${JSON.stringify(inspection)}\n` : renderStatsInspection(inspection));
 		return;
 	}
 	if (command === "bootstrap") {

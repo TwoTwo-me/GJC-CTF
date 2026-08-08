@@ -61,6 +61,19 @@ export const LactfVersionObservationV2Schema = z
 	})
 	.strict();
 export type LactfVersionObservationV2 = z.infer<typeof LactfVersionObservationV2Schema>;
+export const LactfVersionStatisticsInspectionSchema = z
+	.object({
+		schemaVersion: z.literal("gjc-ctf-stats-inspection-1"),
+		versionsInspected: CountSchema,
+		independentlyVerifiedSolveCount: z.literal(0),
+		status: z.literal("unscored"),
+		comparisonStatus: z.literal("unavailable"),
+		comparable: z.literal(false),
+		tier2Authorized: z.literal(false),
+		limitationsRecorded: CountSchema,
+	})
+	.strict();
+export type LactfVersionStatisticsInspection = z.infer<typeof LactfVersionStatisticsInspectionSchema>;
 
 const INVALIDATION_EVIDENCE_REF = "artifacts/ctf/lactf-expanded-v2-invalidation.json";
 const REVOKED_OBSERVATION_DIGESTS = new Set<Digest>([
@@ -102,4 +115,18 @@ export function validateLactfVersionStatisticsArtifact(value: unknown): LactfVer
 		throw new Error("LA CTF version statistics artifact is not an active diagnostic observation");
 	}
 	return observation;
+}
+export function projectLactfVersionStatisticsInspection(
+	observation: LactfVersionObservationV2,
+): LactfVersionStatisticsInspection {
+	return LactfVersionStatisticsInspectionSchema.parse({
+		schemaVersion: "gjc-ctf-stats-inspection-1",
+		versionsInspected: observation.versions.length,
+		independentlyVerifiedSolveCount: 0,
+		status: "unscored",
+		comparisonStatus: "unavailable",
+		comparable: false,
+		tier2Authorized: false,
+		limitationsRecorded: observation.limitations.length,
+	});
 }
