@@ -1,0 +1,78 @@
+{
+  "schemaVersion": "gjc-ctf-harness-evidence-1",
+  "generatedAt": "2026-08-08T07:52:55.179Z",
+  "sourceBaseCommit": "f2c230abf4a5c53b0b638af4e24ccae86b03c5b7",
+  "archiveSource": {
+    "repositoryUrl": "https://github.com/uclaacm/lactf-archive",
+    "sourceCommit": "3379d4a7b36680764a34e7dc817cc3c94c244764",
+    "challengeCount": 6
+  },
+  "verification": {
+    "focusedSuite": {
+      "command": "bun test packages/coding-agent/test/ctf benchmarks/gjc-ctf packages/coding-agent/test/release-build-args.test.ts",
+      "files": 42,
+      "testsPassed": 281,
+      "testsFailed": 0,
+      "assertions": 1090
+    },
+    "codingAgentTypecheck": {
+      "command": "bun --cwd=packages/coding-agent run check:types",
+      "status": "failed-unrelated",
+      "ctfDiagnostics": 0,
+      "reason": "Existing diagnostics remain in non-CTF provider, ACP, browser, LSP, and docs-rs surfaces."
+    },
+    "releaseBuild": {
+      "command": "bun --cwd=packages/coding-agent run build",
+      "status": "passed",
+      "artifacts": [
+        {
+          "path": "packages/coding-agent/dist/gjc-ctf",
+          "size": 230582400,
+          "sha256": "af31b22e64bd1299bfc2349419237071d81c7f6f4ad54d5e43cc6a8295ac7084"
+        },
+        {
+          "path": "packages/coding-agent/dist/gjc",
+          "size": 258623616,
+          "sha256": "672875a8ea297c082a646a79ef5a863ff330949a00fd1c4dac38e4d53b6fc15e"
+        },
+        {
+          "path": "packages/coding-agent/src/ctf/dashboard/embedded-client.generated.txt",
+          "size": 6849,
+          "sha256": "f5e1f53a39cd9a0ad19e156e5747949a1e6759dba7b1f08696eae0bb4c2b91dc"
+        }
+      ]
+    },
+    "compiledSmoke": {
+      "commands": [
+        "packages/coding-agent/dist/gjc-ctf --help",
+        "packages/coding-agent/dist/gjc-ctf bootstrap --category essential --category reverse --json",
+        "packages/coding-agent/dist/gjc-ctf init <temporary-workspace> --json",
+        "packages/coding-agent/dist/gjc-ctf status --json"
+      ],
+      "status": "passed",
+      "bootstrapReady": ["python", "git", "objdump", "z3"],
+      "workspaceStatus": "available",
+      "runStatus": "unavailable"
+    }
+  },
+  "security": {
+    "archiveFlagUsed": false,
+    "officialSolutionUsed": false,
+    "candidateContentStored": false,
+    "invalidatedEvidence": "artifacts/ctf/lactf-expanded-v2-invalidation.json",
+    "cryptoVisibleFiles": ["chall.py", "ct.txt"]
+  },
+  "benchmark": {
+    "status": "unavailable",
+    "scored": false,
+    "tierExpansionAuthorized": false,
+    "independentlyVerifiedSolveCount": 0,
+    "missingAuthorities": [
+      "permission record",
+      "independent trusted oracle registry",
+      "benchmark calibration",
+      "signed runtime authority"
+    ]
+  },
+  "evidenceDigest": "421794061a38603a34a94e0e9489a5f4597564ee5acca5acd2c71f6ce9f470c3"
+}

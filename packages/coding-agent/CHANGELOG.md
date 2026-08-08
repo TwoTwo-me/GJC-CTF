@@ -1,6 +1,12 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+- Added the additive `gjc-ctf` harness with challenge-scoped journals/fences/checkpoints, signed graph/oracle authority, bounded parallel candidate scheduling, pinned LA CTF corpus acquisition, deterministic non-scored five-repeat fixtures, and a durable signed-report skill optimizer.
+- Added a source-bundled, category-based CTF tool bootstrap with dry-run/apply audit output, exact package-manager argv, post-install verification, and fail-closed rejection of challenge-controlled manifests.
+- Added operator guidance for corpus provenance, parallel scheduling, benchmark lineage, optimizer promotion/rollback, recovery, safe tool installation, and the external authorities still required for scored solves.
+- Added a tool-free production GJC AgentSession solver adapter and digest-sealed resumable local campaign controller with bounded parallel attempts, provenance-bound visible inputs, durable candidate/unknown/failure retention, cancellation, and a fixed `2026-08-09T00:00:00Z` hard stop.
+- Added a reviewed, bounded Z3 regex-grid analyzer and ordered analyzer seam for local candidate campaigns; unsupported inputs fall through to the isolated AgentSession, while derived bitmaps remain unverified candidates.
 
 ## [0.12.15] - 2026-08-06
 

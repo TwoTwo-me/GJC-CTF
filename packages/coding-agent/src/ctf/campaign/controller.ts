@@ -1,0 +1,479 @@
+import { randomUUID } from "node:crypto";
+import * as path from "node:path";
+import { canonicalDigest, type Digest } from "../contracts/digest";
+import { CtfError } from "../contracts/errors";
+import { type CorpusEntry, type MaterializedCorpus, validateCorpusEntry, validateMaterializedCorpus } from "../corpus";
+import {
+	type CtfArtifactEvidence,
+	type CtfBatchScheduleResult,
+	type CtfScheduledRun,
+	type CtfSolverBackend,
+	type CtfTerminationRequest,
+	scheduleCtfRuns,
+} from "../runtime/scheduler";
+import { type CtfStateStoreLike, createCtfStateStore } from "../state/storage";
+
+export const CTF_CAMPAIGN_HARD_STOP = "2026-08-09T00:00:00Z" as const;
+const CAMPAIGN_SCHEMA = "ctf-campaign-1" as const;
+const MAX_REASON_LENGTH = 256;
+
+export type CampaignAttempt = Readonly<{
+	attempt: number;
+	startedAt: string;
+	finishedAt?: string;
+	status: "candidate" | "unknown" | "failure";
+	reason?: string;
+	artifacts: readonly string[];
+	artifactEvidence?: readonly CtfArtifactEvidence[];
+}>;
+
+export type CampaignChallenge = Readonly<{
+	challengeId: string;
+	status: "pending" | "candidate" | "unknown" | "failure";
+	attempts: readonly CampaignAttempt[];
+	materialized?: Readonly<{ root: string; provenanceDigest: string }>;
+}>;
+
+export type CtfCampaignState = Readonly<{
+	schemaVersion: typeof CAMPAIGN_SCHEMA;
+	campaignId: string;
+	competitionId: string;
+	createdAt: string;
+	updatedAt: string;
+	stopAt: typeof CTF_CAMPAIGN_HARD_STOP;
+	challenges: readonly CampaignChallenge[];
+	stateDigest: Digest;
+}>;
+
+export type CtfCampaignMaterializer = ((
+	input: Readonly<{
+		challengeId: string;
+		attempt: number;
+		ownerId: string;
+		signal: AbortSignal;
+	}>,
+) => Promise<MaterializedCorpus>) & {
+	/** Resolves only after this materializer can prove the attempt cannot write again. */
+	terminate?(request: CtfTerminationRequest): Promise<void>;
+};
+
+export type CtfCampaignOptions = Readonly<{
+	campaignId: string;
+	competitionId: string;
+	challenges: readonly CorpusEntry[];
+	store: CtfStateStoreLike;
+	backend: CtfSolverBackend;
+	authorityFor: Parameters<typeof scheduleCtfRuns>[0]["authorityFor"];
+	prepareRun?: Parameters<typeof scheduleCtfRuns>[0]["prepareRun"];
+	terminatePreparation?: Parameters<typeof scheduleCtfRuns>[0]["terminatePreparation"];
+	concurrency: number;
+	budgetMs?: number;
+	maxAttempts: number;
+	backoffMs?: number;
+	materialize?: CtfCampaignMaterializer;
+	signal?: AbortSignal;
+}>;
+
+export type CtfCampaignResult = Readonly<{
+	state: CtfCampaignState;
+	runs: readonly CtfBatchScheduleResult[];
+	stopped: boolean;
+}>;
+
+function reason(value: string | undefined): string | undefined {
+	if (value === undefined || value.trim().length === 0) return undefined;
+	return value.length > MAX_REASON_LENGTH ? `${value.slice(0, MAX_REASON_LENGTH)}…` : value;
+}
+
+function campaignPath(id: string): string {
+	if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(id))
+		throw new CtfError("invalid_api_request", "campaign id is invalid");
+	return path.posix.join("campaigns", `${id}.json`);
+}
+function sealState(state: Omit<CtfCampaignState, "stateDigest">): CtfCampaignState {
+	return { ...state, stateDigest: canonicalDigest(state) };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function validArtifactEvidence(value: unknown): value is CtfArtifactEvidence {
+	if (!isRecord(value)) return false;
+	const size = value.size;
+	return (
+		typeof value.path === "string" &&
+		value.path.length > 0 &&
+		!path.isAbsolute(value.path) &&
+		!value.path.includes("\\") &&
+		path.posix.normalize(value.path) === value.path &&
+		value.path !== "." &&
+		!value.path.startsWith("../") &&
+		!value.path.includes("/../") &&
+		typeof value.digest === "string" &&
+		/^[a-f0-9]{64}$/u.test(value.digest) &&
+		typeof size === "number" &&
+		Number.isSafeInteger(size) &&
+		size >= 0
+	);
+}
+
+export function validateCampaignState(value: unknown): CtfCampaignState {
+	if (
+		!isRecord(value) ||
+		value.schemaVersion !== CAMPAIGN_SCHEMA ||
+		typeof value.campaignId !== "string" ||
+		typeof value.competitionId !== "string" ||
+		typeof value.createdAt !== "string" ||
+		typeof value.updatedAt !== "string" ||
+		value.stopAt !== CTF_CAMPAIGN_HARD_STOP ||
+		typeof value.stateDigest !== "string" ||
+		!Array.isArray(value.challenges)
+	)
+		throw new CtfError("integrity_error", "campaign state schema is invalid");
+	const { stateDigest, ...basis } = value;
+	if (canonicalDigest(basis) !== stateDigest)
+		throw new CtfError("integrity_error", "campaign state digest is invalid");
+	for (const challenge of value.challenges) {
+		if (
+			!isRecord(challenge) ||
+			typeof challenge.challengeId !== "string" ||
+			!["pending", "candidate", "unknown", "failure"].includes(String(challenge.status)) ||
+			!Array.isArray(challenge.attempts)
+		)
+			throw new CtfError("integrity_error", "campaign challenge state is invalid");
+		for (const [index, attempt] of challenge.attempts.entries()) {
+			if (
+				!isRecord(attempt) ||
+				attempt.attempt !== index + 1 ||
+				typeof attempt.startedAt !== "string" ||
+				!["candidate", "unknown", "failure"].includes(String(attempt.status)) ||
+				!Array.isArray(attempt.artifacts)
+			)
+				throw new CtfError("integrity_error", "campaign attempt state is invalid");
+			const artifacts = attempt.artifacts;
+			if (
+				artifacts.some(
+					artifact =>
+						typeof artifact !== "string" ||
+						artifact.length === 0 ||
+						path.isAbsolute(artifact) ||
+						artifact.includes("\\") ||
+						path.posix.normalize(artifact) !== artifact ||
+						artifact === "." ||
+						artifact.startsWith("../") ||
+						artifact.includes("/../"),
+				) ||
+				new Set(artifacts).size !== artifacts.length
+			)
+				throw new CtfError("integrity_error", "campaign attempt state is invalid");
+			if (attempt.artifactEvidence === undefined) continue;
+			if (!Array.isArray(attempt.artifactEvidence) || !attempt.artifactEvidence.every(validArtifactEvidence))
+				throw new CtfError("integrity_error", "campaign attempt state is invalid");
+			const artifactEvidence = attempt.artifactEvidence;
+			if (
+				new Set(artifactEvidence.map(artifact => artifact.path)).size !== artifactEvidence.length ||
+				artifactEvidence.length !== artifacts.length ||
+				artifactEvidence.some((artifact, artifactIndex) => artifact.path !== artifacts[artifactIndex])
+			)
+				throw new CtfError("integrity_error", "campaign attempt state is invalid");
+		}
+	}
+	return value as CtfCampaignState;
+}
+
+async function loadState(
+	store: ReturnType<typeof createCtfStateStore>,
+	target: string,
+	fallback: CtfCampaignState,
+): Promise<CtfCampaignState> {
+	const file = Bun.file(store.resolve(target));
+	if (!(await file.exists())) return fallback;
+	let value: unknown;
+	try {
+		value = JSON.parse(await file.text()) as unknown;
+	} catch {
+		throw new CtfError("integrity_error", "campaign state is corrupt");
+	}
+	return validateCampaignState(value);
+}
+
+function initialState(options: CtfCampaignOptions, now: Date): CtfCampaignState {
+	const ids = options.challenges.map(entry => entry.source.challengeId);
+	for (const entry of options.challenges) validateCorpusEntry(entry);
+	if (ids.length === 0 || new Set(ids).size !== ids.length)
+		throw new CtfError("invalid_api_request", "campaign challenges must be unique");
+	return sealState({
+		schemaVersion: CAMPAIGN_SCHEMA,
+		campaignId: options.campaignId,
+		competitionId: options.competitionId,
+		createdAt: now.toISOString(),
+		updatedAt: now.toISOString(),
+		stopAt: CTF_CAMPAIGN_HARD_STOP,
+		challenges: ids.sort().map(challengeId => ({ challengeId, status: "pending", attempts: [] })),
+	});
+}
+
+function outcomeStatus(outcome: Pick<CtfScheduledRun, "status">): "candidate" | "unknown" | "failure" {
+	if (outcome.status === "candidate") return "candidate";
+	if (outcome.status === "failed") return "failure";
+	return "unknown";
+}
+
+function defaultMaterializer(_options: CtfCampaignOptions): CtfCampaignMaterializer {
+	return async ({ challengeId }) => {
+		throw new CtfError("missing_provenance", `a materializer is required for ${challengeId}`);
+	};
+}
+
+function createDeadlineSignal(signal: AbortSignal | undefined): Readonly<{
+	signal: AbortSignal;
+	reached(): boolean;
+	dispose(): void;
+}> {
+	const stop = Date.parse(CTF_CAMPAIGN_HARD_STOP);
+	const controller = new AbortController();
+	const abortForDeadline = () => controller.abort("campaign deadline reached");
+	const remainingMs = stop - Date.now();
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	if (remainingMs <= 0) abortForDeadline();
+	else timer = setTimeout(abortForDeadline, remainingMs);
+	const abortForCaller = () => controller.abort(signal?.reason);
+	if (signal?.aborted) abortForCaller();
+	else signal?.addEventListener("abort", abortForCaller, { once: true });
+	return {
+		signal: controller.signal,
+		reached: () => controller.signal.reason === "campaign deadline reached" || Date.now() >= stop,
+		dispose: () => {
+			if (timer !== undefined) clearTimeout(timer);
+			signal?.removeEventListener("abort", abortForCaller);
+		},
+	};
+}
+
+async function materializeWithAbort(
+	materialize: CtfCampaignMaterializer,
+	input: Readonly<{ challengeId: string; attempt: number; ownerId: string; signal: AbortSignal }>,
+): Promise<MaterializedCorpus | undefined> {
+	if (input.signal.aborted) return undefined;
+	const cancelled = Promise.withResolvers<undefined>();
+	let termination: Promise<void> | undefined;
+	const terminateMaterialization = () => {
+		if (termination === undefined) {
+			if (materialize.terminate === undefined)
+				termination = Promise.reject(
+					new CtfError("invalid_api_request", "production materialization requires termination acknowledgment"),
+				);
+			else
+				termination = materialize.terminate({
+					runId: input.ownerId,
+					challengeId: input.challengeId,
+					ownerId: input.ownerId,
+					reason: input.signal.reason === "campaign deadline reached" ? "budget_exhausted" : "cancelled",
+				});
+			void termination.then(
+				() => cancelled.resolve(undefined),
+				error => cancelled.reject(error),
+			);
+		}
+		return termination;
+	};
+	const abort = () => {
+		void terminateMaterialization();
+	};
+	input.signal.addEventListener("abort", abort, { once: true });
+	const materialization = Promise.resolve().then(() => materialize(input));
+	try {
+		const result = await Promise.race([materialization, cancelled.promise]);
+		if (input.signal.aborted) {
+			await terminateMaterialization();
+			return undefined;
+		}
+		return result;
+	} finally {
+		input.signal.removeEventListener("abort", abort);
+	}
+}
+function reserveMaterializationOwnerId(owners: Set<string>): string {
+	let ownerId = randomUUID();
+	while (owners.has(ownerId)) ownerId = randomUUID();
+	owners.add(ownerId);
+	return ownerId;
+}
+async function backoffWithAbort(milliseconds: number, signal: AbortSignal): Promise<void> {
+	if (signal.aborted) return;
+	const cancelled = Promise.withResolvers<void>();
+	const abort = () => cancelled.resolve();
+	signal.addEventListener("abort", abort, { once: true });
+	try {
+		await Promise.race([Bun.sleep(milliseconds), cancelled.promise]);
+	} finally {
+		signal.removeEventListener("abort", abort);
+	}
+}
+
+async function runCtfCampaignLocked(
+	options: CtfCampaignOptions,
+	store: ReturnType<typeof createCtfStateStore>,
+	target: string,
+): Promise<CtfCampaignResult> {
+	const deadline = createDeadlineSignal(options.signal);
+	try {
+		return await runCtfCampaignWithDeadline(options, store, target, deadline);
+	} finally {
+		deadline.dispose();
+	}
+}
+
+async function runCtfCampaignWithDeadline(
+	options: CtfCampaignOptions,
+	store: ReturnType<typeof createCtfStateStore>,
+	target: string,
+	deadline: Readonly<{ signal: AbortSignal; reached(): boolean }>,
+): Promise<CtfCampaignResult> {
+	const now = () => new Date();
+	const stop = Date.parse(CTF_CAMPAIGN_HARD_STOP);
+	const initial = initialState(options, now());
+	let state = await loadState(store, target, initial);
+	if (
+		state.campaignId !== options.campaignId ||
+		state.competitionId !== options.competitionId ||
+		state.stopAt !== CTF_CAMPAIGN_HARD_STOP
+	) {
+		throw new CtfError("integrity_error", "campaign state identity or hard stop does not match");
+	}
+	const requestedChallengeIds = options.challenges.map(entry => entry.source.challengeId).sort();
+	const storedChallengeIds = state.challenges.map(challenge => challenge.challengeId).sort();
+	if (
+		requestedChallengeIds.length !== storedChallengeIds.length ||
+		requestedChallengeIds.some((challengeId, index) => challengeId !== storedChallengeIds[index])
+	)
+		throw new CtfError("integrity_error", "campaign challenge set does not match");
+	const corpusByChallengeId = new Map<string, (typeof options.challenges)[number]>(
+		options.challenges.map(entry => [entry.source.challengeId, entry]),
+	);
+	const materialize = options.materialize ?? defaultMaterializer(options);
+	const materializationOwners = new Set<string>();
+	const runs: CtfBatchScheduleResult[] = [];
+	for (let iteration = 0; iteration < options.maxAttempts; iteration += 1) {
+		if (deadline.signal.aborted || deadline.reached()) break;
+		const pending = state.challenges
+			.filter(challenge => challenge.status !== "candidate" && challenge.attempts.length < options.maxAttempts)
+			.map(challenge => challenge.challengeId);
+		if (pending.length === 0) break;
+		const startedAt = now().toISOString();
+		const materialized = new Map<
+			string,
+			Readonly<{ root: string; provenanceDigest: string; visibleFileDigests: Readonly<Record<string, string>> }>
+		>();
+		for (const challengeId of pending) {
+			const challenge = state.challenges.find(item => item.challengeId === challengeId);
+			if (challenge === undefined) throw new CtfError("integrity_error", "campaign challenge state is missing");
+			const corpus = await materializeWithAbort(materialize, {
+				challengeId,
+				attempt: challenge.attempts.length + 1,
+				ownerId: reserveMaterializationOwnerId(materializationOwners),
+				signal: deadline.signal,
+			});
+			if (corpus === undefined) break;
+			const entry = corpusByChallengeId.get(challengeId);
+			if (entry === undefined) throw new CtfError("integrity_error", "campaign corpus entry is missing");
+			const authority = await validateMaterializedCorpus(entry, corpus);
+			materialized.set(challengeId, {
+				root: corpus.root,
+				...authority,
+			});
+		}
+		if (deadline.signal.aborted || deadline.reached()) break;
+		const remainingMs = stop - now().getTime();
+		if (remainingMs <= 0) break;
+		if (deadline.signal.aborted || deadline.reached()) break;
+		const batch = await scheduleCtfRuns({
+			competitionId: options.competitionId,
+			challengeIds: pending,
+			mode: "competition",
+			concurrency: options.concurrency,
+			budgetMs: Math.min(options.budgetMs ?? remainingMs, remainingMs),
+			backend: options.backend,
+			authorityFor: options.authorityFor,
+			materializedFor: async ({ challengeId }) => {
+				const context = materialized.get(challengeId);
+				if (context === undefined)
+					throw new CtfError("missing_provenance", `materialized corpus is unavailable for ${challengeId}`);
+				return context;
+			},
+			terminateMaterialization: async () => {},
+			prepareRun: options.prepareRun,
+			terminatePreparation: options.terminatePreparation,
+			signal: deadline.signal,
+			createUnavailable: async challengeId => ({
+				schemaVersion: "ctf-run-result-1",
+				status: "unavailable",
+				runId: `unavailable-${challengeId}`,
+				competitionId: options.competitionId,
+				challengeId,
+				mode: "competition",
+				reason: "solver backend unavailable",
+			}),
+		});
+		runs.push(batch);
+		const finishedAt = now().toISOString();
+		const { stateDigest: _stateDigest, ...stateBasis } = state;
+		state = sealState({
+			...stateBasis,
+			updatedAt: finishedAt,
+			challenges: state.challenges.map(challenge => {
+				const result = batch.results.find(
+					candidate => "challengeId" in candidate && candidate.challengeId === challenge.challengeId,
+				);
+				if (result === undefined) return challenge;
+				const status = outcomeStatus(result);
+				const context = materialized.get(challenge.challengeId);
+				if (context === undefined)
+					throw new CtfError("integrity_error", "campaign materialized context is missing");
+				const outcomeReason = reason(result.reason);
+				return {
+					...challenge,
+					status,
+					materialized: context,
+					attempts: [
+						...challenge.attempts,
+						{
+							attempt: challenge.attempts.length + 1,
+							startedAt,
+							finishedAt,
+							status,
+							...(outcomeReason === undefined ? {} : { reason: outcomeReason }),
+							artifacts: [...("artifacts" in result ? (result.artifacts ?? []) : [])],
+							...("artifactEvidence" in result && result.artifactEvidence !== undefined
+								? { artifactEvidence: result.artifactEvidence.map(artifact => ({ ...artifact })) }
+								: {}),
+						},
+					],
+				};
+			}),
+		});
+		await store.writeJsonAtomic(target, state, { durability: "ctf" });
+		if (options.backoffMs !== undefined && options.backoffMs > 0 && now().getTime() < stop)
+			await backoffWithAbort(Math.min(options.backoffMs, Math.max(0, stop - now().getTime())), deadline.signal);
+	}
+	return { state, runs, stopped: deadline.reached() };
+}
+/** Run resumable, non-scoring attempts over only pinned, materialized corpus files. */
+function validateCampaignOptions(options: CtfCampaignOptions): void {
+	if (!Number.isSafeInteger(options.maxAttempts) || options.maxAttempts < 1)
+		throw new CtfError("invalid_api_request", "maxAttempts must be positive");
+	if (!Number.isSafeInteger(options.concurrency) || options.concurrency < 1)
+		throw new CtfError("invalid_api_request", "concurrency must be positive");
+}
+
+/** Run resumable, non-scoring attempts over only pinned, materialized corpus files. */
+export async function runCtfCampaign(options: CtfCampaignOptions): Promise<CtfCampaignResult> {
+	if (Object.hasOwn(options, "now"))
+		throw new CtfError("invalid_api_request", "campaign clock control is internal only");
+	validateCampaignOptions(options);
+	const store = createCtfStateStore(options.store);
+	const target = campaignPath(options.campaignId);
+	return await store.withLock(`${target}.campaign`, () => runCtfCampaignLocked(options, store, target), {
+		durability: "ctf",
+	});
+}

@@ -25,6 +25,7 @@
 	"main": "./src/index.ts",
 	"types": "./src/index.ts",
 	"bin": {
+		"gjc-ctf": "bin/gjc-ctf.js",
 		"gjc": "bin/gjc.js"
 	},
 	"scripts": {
@@ -42,7 +43,9 @@
 		"fmt": "biome format --write . && bun run format-prompts",
 		"format-prompts": "bun scripts/format-prompts.ts",
 		"generate-docs-index": "bun scripts/generate-docs-index.ts",
-		"prepack": "bun scripts/generate-docs-index.ts",
+		"generate-ctf-dashboard": "bun src/ctf/dashboard/build.ts",
+		"generate-ctf-dashboard-archive": "bun scripts/generate-ctf-dashboard-archive.ts",
+		"prepack": "bun scripts/generate-docs-index.ts && bun run generate-ctf-dashboard && bun run generate-ctf-dashboard-archive",
 		"generate-template": "bun scripts/generate-template.ts",
 		"install:defaults": "bun src/cli.ts setup defaults",
 		"verify:insane-vendor": "bun scripts/verify-insane-vendor.ts",
@@ -88,7 +91,12 @@
 	},
 	"files": [
 		"src",
+		"src/ctf/dashboard/dist",
+		"src/ctf/dashboard/embedded-client.generated.txt",
+		"docs/gjc-ctf",
+		"dist/gjc-ctf",
 		"bin",
+		"bin/gjc-ctf.js",
 		"scripts",
 		"examples",
 		"README.md",

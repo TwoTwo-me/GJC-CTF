@@ -2,7 +2,15 @@ import { describe, expect, it } from "bun:test";
 
 import * as path from "node:path";
 
-import { buildDevCompileArgs, buildReleaseCompileArgs, releaseEntrypoints } from "../scripts/compile-args";
+import {
+	buildDevCompileArgs,
+	buildDevCtfCompileArgs,
+	buildReleaseCompileArgs,
+	buildReleaseCtfCompileArgs,
+	devCtfEntrypoints,
+	releaseCtfEntrypoints,
+	releaseEntrypoints,
+} from "../scripts/compile-args";
 
 const releaseArgs = buildReleaseCompileArgs("bun-darwin-arm64", "packages/coding-agent/binaries/gjc-darwin-arm64");
 
@@ -67,6 +75,18 @@ describe("release build compile args", () => {
 		expect(buildDevCompileArgs()).not.toContain("../ai/src/models.json");
 	});
 
+	it("embeds the CTF skill through its static text import, not as a second entrypoint", () => {
+		const releaseCtfArgs = buildReleaseCtfCompileArgs(
+			"bun-darwin-arm64",
+			"packages/coding-agent/binaries/gjc-ctf-darwin-arm64",
+		);
+		const devCtfArgs = buildDevCtfCompileArgs();
+		expect(releaseCtfEntrypoints).not.toContain("./packages/coding-agent/src/ctf/skills/ctf.md");
+		expect(devCtfEntrypoints).not.toContain("./src/ctf/skills/ctf.md");
+		expect(releaseCtfArgs).not.toContain("./packages/coding-agent/src/ctf/skills/ctf.md");
+		expect(devCtfArgs).not.toContain("./src/ctf/skills/ctf.md");
+	});
+
 	it("has exactly one target and outfile", () => {
 		expect(valuesAfter(releaseArgs, "--target")).toEqual(["bun-darwin-arm64"]);
 		expect(valuesAfter(releaseArgs, "--outfile")).toEqual(["packages/coding-agent/binaries/gjc-darwin-arm64"]);
@@ -85,12 +105,43 @@ describe("release build compile args", () => {
 
 		const buildLines = stdout.split("\n").filter(line => line.includes("bun build --compile"));
 		expect(buildLines.length).toBeGreaterThan(0);
+		expect(buildLines.some(line => line.includes("/gjc-ctf-") || line.includes("\\gjc-ctf-"))).toBe(true);
 		for (const line of buildLines) {
-			const target = valuesAfter(line.replace(/^DRY RUN /, "").split(" "), "--target")[0];
-			const outfile = valuesAfter(line.replace(/^DRY RUN /, "").split(" "), "--outfile")[0];
+			const argv = line.replace(/^DRY RUN /, "").split(" ");
+			const target = valuesAfter(argv, "--target")[0];
+			const outfile = valuesAfter(argv, "--outfile")[0];
 			expect(target).toBeDefined();
 			expect(outfile).toBeDefined();
-			expect(line).toBe(`DRY RUN ${buildReleaseCompileArgs(target as string, outfile as string).join(" ")}`);
+			const builder = path.basename(outfile as string).startsWith("gjc-ctf-")
+				? buildReleaseCtfCompileArgs
+				: buildReleaseCompileArgs;
+			expect(line).toBe(`DRY RUN ${builder(target as string, outfile as string).join(" ")}`);
 		}
+	});
+	it("rejects empty or duplicate explicit release target selectors", () => {
+		const repoRoot = path.resolve(import.meta.dir, "../../..");
+		for (const args of [
+			["--dry-run", "--targets="],
+			["--dry-run", "--targets"],
+			["--dry-run", "--targets=linux-x64", "--targets=darwin-arm64"],
+		]) {
+			const result = Bun.spawnSync({
+				cmd: [process.execPath, "scripts/ci-release-build-binaries.ts", ...args],
+				cwd: repoRoot,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			expect(result.exitCode).not.toBe(0);
+			expect(result.stderr.toString()).toMatch(/targets.*(?:non-empty|only once)/i);
+		}
+	});
+	it("carries CTF binaries through smoke, upload, download, and release", async () => {
+		const repoRoot = path.resolve(import.meta.dir, "../../..");
+		const workflow = await Bun.file(path.join(repoRoot, ".github", "workflows", "ci.yml")).text();
+		expect(workflow).toContain("ctf_binary_path:");
+		expect(workflow).toContain('"${{ matrix.ctf_binary_path }}" --version');
+		expect(workflow).toContain("name: gjc-ctf-binary-${{ matrix.target_id }}");
+		expect(workflow).toContain("pattern: gjc-ctf-binary-*");
+		expect(workflow).toContain("files: release-binaries/gjc-*");
 	});
 });

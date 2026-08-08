@@ -1,0 +1,14 @@
+{
+  "challengeId": "example-static",
+  "rootDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "visibleArtifacts": [
+    "inputs/task.json",
+    "README.txt"
+  ],
+  "writableArtifacts": [
+    "outputs/answer.json"
+  ],
+  "network": "off",
+  "credentials": "none",
+  "preserveProvenance": true
+}

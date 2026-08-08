@@ -1,0 +1,76 @@
+{
+  "schemaVersion": "gjc-ctf-version-observation-2",
+  "generatedAt": "2026-08-08T07:52:55.179Z",
+  "hardStop": "2026-08-09T00:00:00.000Z",
+  "sourceCommit": "3379d4a7b36680764a34e7dc817cc3c94c244764",
+  "versions": [
+    {
+      "versionId": "campaign-expanded-v2",
+      "scope": "six-challenge-campaign",
+      "status": "invalidated",
+      "evidenceRef": "artifacts/ctf/lactf-expanded-v2-invalidation.json",
+      "eligibleChallengeCount": 6,
+      "independentlyVerifiedSolveCount": 0,
+      "statisticsUsable": false,
+      "reason": "The crypto materialization allowlist exposed an unnecessary plaintext source. All candidate, failure, runtime, and derived comparison counts from this campaign are invalid."
+    },
+    {
+      "versionId": "tier1-analyzers-v1.1.0",
+      "scope": "tier1-local-checker-diagnostic",
+      "status": "diagnostic-only",
+      "evidenceRef": "artifacts/ctf/lactf-tier1-local-evidence-v1.json",
+      "eligibleChallengeCount": 3,
+      "reviewedAnalyzerCount": 3,
+      "localCheckerPassCount": 3,
+      "independentlyVerifiedSolveCount": 0,
+      "statisticsUsable": false,
+      "reason": "Ephemeral local checker authority proves plumbing only; it is not independent benchmark evidence."
+    },
+    {
+      "versionId": "ctf-harness-v3",
+      "scope": "six-challenge-harness-and-release",
+      "status": "verified-harness-unscored",
+      "evidenceRef": "artifacts/ctf/ctf-harness-v3-evidence.json",
+      "eligibleChallengeCount": 6,
+      "reviewedAnalyzerCount": 3,
+      "tier1ChallengeCount": 3,
+      "tier2ChallengeCount": 3,
+      "independentlyVerifiedSolveCount": 0,
+      "testsPassed": 281,
+      "testsFailed": 0,
+      "compiledSmokePassed": true,
+      "scored": false,
+      "tierExpansionAuthorized": false
+    }
+  ],
+  "comparison": {
+    "benchmarkStatus": "unavailable",
+    "comparable": false,
+    "reason": "No two versions have independent permission, calibrated runtime authority, and a pre-authorized trusted oracle over the same challenge denominator.",
+    "knownHarnessDeltas": {
+      "testsPassedSinceG006Receipt": 119,
+      "reviewedAnalyzerCountSinceInitialRoute": 2,
+      "independentlyVerifiedSolveCount": 0
+    },
+    "unknownMetrics": [
+      "solveRate",
+      "passAt1",
+      "passAt3",
+      "firstValidLatencyMs",
+      "p50RuntimeMs",
+      "p95RuntimeMs",
+      "tokens",
+      "toolCalls",
+      "cost",
+      "confidence",
+      "holdout"
+    ]
+  },
+  "limitations": [
+    "Archive flags, official solutions, and candidate contents are excluded from evidence.",
+    "Invalidated campaign observations are not reused as a baseline.",
+    "Tier 2 remains locked until independent active-tier benchmark verification exists.",
+    "Harness verification is not a solve-rate claim."
+  ],
+  "observationDigest": "695ac99878d9ec731ba0eb7366b9295e4563db824e7fdefcef69ced8a35072a4"
+}

@@ -1,0 +1,203 @@
+{
+  "schemaVersion": "gjc-ctf-tier1-local-evidence-1",
+  "sourceCommit": "3379d4a7b36680764a34e7dc817cc3c94c244764",
+  "campaignStateDigest": "3a834bd5cbb0a988e8c948ea454255d22ec3d3851b8617a64f6c1d920376e557",
+  "issuedAt": "2026-08-08T04:46:13.960Z",
+  "scored": false,
+  "tierExpansionAuthorized": false,
+  "authorityScope": "ephemeral source-bound local checker; not a pre-authorized benchmark registry",
+  "trustedRegistry": {
+    "registry": {
+      "schemaVersion": "ctf-oracle-registry-1",
+      "entries": [
+        {
+          "schemaVersion": "ctf-oracle-entry-1",
+          "oracleId": "local-endians-v1",
+          "protocolVersion": "local-checker-v1",
+          "executableRef": "gjc-ctf-local:local-endians-v1",
+          "imageDigest": "12c0b6dce8ea64177dec6b187ad8f3dd608cc4b8203cf187046102d1643ce0c6",
+          "artifactDigest": "12c0b6dce8ea64177dec6b187ad8f3dd608cc4b8203cf187046102d1643ce0c6",
+          "backendDigest": "12c0b6dce8ea64177dec6b187ad8f3dd608cc4b8203cf187046102d1643ce0c6",
+          "allowedChallengeIds": [
+            "lactf-2026-misc-endians"
+          ],
+          "publicKeyId": "local-oracle-key-v1",
+          "signerKeyId": "local-oracle-key-v1",
+          "outputSchemaVersion": "ctf-oracle-result-1",
+          "signature": "hs7wOgGHTMsrWXDfSo7YzGzhWObEPXuNAwb6CrfDFV/pnK8RLUO/m1Jwl3ooclkZxr7zySDzY6jRAODlBnDpAA=="
+        },
+        {
+          "schemaVersion": "ctf-oracle-entry-1",
+          "oracleId": "local-ooo-v1",
+          "protocolVersion": "local-checker-v1",
+          "executableRef": "gjc-ctf-local:local-ooo-v1",
+          "imageDigest": "9718c0ff5f4420260802aa34e35a8c4b4bcf10096e555adc2931163a20463079",
+          "artifactDigest": "9718c0ff5f4420260802aa34e35a8c4b4bcf10096e555adc2931163a20463079",
+          "backendDigest": "9718c0ff5f4420260802aa34e35a8c4b4bcf10096e555adc2931163a20463079",
+          "allowedChallengeIds": [
+            "lactf-2026-rev-ooo"
+          ],
+          "publicKeyId": "local-oracle-key-v1",
+          "signerKeyId": "local-oracle-key-v1",
+          "outputSchemaVersion": "ctf-oracle-result-1",
+          "signature": "9figRMAlsLSl86sz57bb4J5OQ9ysm8XCe5t5Zoe+ahb5dlWX2HowGM3JOAK40MQsq9PrnC98mI9YqgUC284wDA=="
+        },
+        {
+          "schemaVersion": "ctf-oracle-entry-1",
+          "oracleId": "local-flag-finder-v1",
+          "protocolVersion": "local-checker-v1",
+          "executableRef": "gjc-ctf-local:local-flag-finder-v1",
+          "imageDigest": "b567ae53579e391a304c8eae8bfb293315ff36482eda62e11f8f2a0c1e4531cc",
+          "artifactDigest": "b567ae53579e391a304c8eae8bfb293315ff36482eda62e11f8f2a0c1e4531cc",
+          "backendDigest": "b567ae53579e391a304c8eae8bfb293315ff36482eda62e11f8f2a0c1e4531cc",
+          "allowedChallengeIds": [
+            "lactf-2026-rev-flag-finder"
+          ],
+          "publicKeyId": "local-oracle-key-v1",
+          "signerKeyId": "local-oracle-key-v1",
+          "outputSchemaVersion": "ctf-oracle-result-1",
+          "signature": "bHmiqagAGF5l93ty2bPSWGPdKgFhFbod80S0oa/YiQZzfH/r3s3IXpmer5+VreQNP/MLWduHq7MlmeTlm02dBQ=="
+        }
+      ],
+      "registryDigest": "5d24d2a0f659ba95fb6ee1258919df2de93db5075a02bf7f26eb7b21a609184d"
+    },
+    "keys": [
+      {
+        "keyId": "local-oracle-key-v1",
+        "algorithm": "ed25519",
+        "publicKey": "MCowBQYDK2VwAyEAxjZltACPNhgdaQBCFuCzDHOT6s7mBPTjO8480Y5ci0k=",
+        "fingerprint": "c41c01d50d58f835332d85acf247a48159be93a9efc19d15b07dc43992976bc5",
+        "active": true
+      }
+    ]
+  },
+  "verifiedResults": [
+    {
+      "verified": true,
+      "result": {
+        "schemaVersion": "ctf-oracle-result-1",
+        "oracleId": "local-endians-v1",
+        "runId": "local-endians-run-v1",
+        "challengeId": "lactf-2026-misc-endians",
+        "nonce": "local-endians-nonce-v1",
+        "candidateDigest": "86b4216ed130974b6765cb224b7b17ba7f39b7082c4ae608ab925cfa4b7ca101",
+        "inputDigest": "e3810f97dfd52c9611fb12a253cd2e610ecdcef142af104b71ffc19de042c48b",
+        "verdict": "pass",
+        "verifierVersion": "gjc-ctf-local-oracle-v1",
+        "outputDigest": "1d421be02e311d3724ef8db1c75c554cb353c7cbcf1fcc0774160ebb59e40895",
+        "sanitizedSummary": "candidate satisfied the source-bound local checker",
+        "signature": "gTjyNeFNouRnviH8wzo7ca6wNNsLQszRzb0Jq796cynRzctBnLsAqr3ZhBCaRZdFe4eZeoKp2ttniR5U67QEBw==",
+        "issuedAt": "2026-08-08T04:46:13.960Z"
+      },
+      "entry": {
+        "schemaVersion": "ctf-oracle-entry-1",
+        "oracleId": "local-endians-v1",
+        "protocolVersion": "local-checker-v1",
+        "executableRef": "gjc-ctf-local:local-endians-v1",
+        "imageDigest": "12c0b6dce8ea64177dec6b187ad8f3dd608cc4b8203cf187046102d1643ce0c6",
+        "artifactDigest": "12c0b6dce8ea64177dec6b187ad8f3dd608cc4b8203cf187046102d1643ce0c6",
+        "backendDigest": "12c0b6dce8ea64177dec6b187ad8f3dd608cc4b8203cf187046102d1643ce0c6",
+        "allowedChallengeIds": [
+          "lactf-2026-misc-endians"
+        ],
+        "publicKeyId": "local-oracle-key-v1",
+        "signerKeyId": "local-oracle-key-v1",
+        "signature": "hs7wOgGHTMsrWXDfSo7YzGzhWObEPXuNAwb6CrfDFV/pnK8RLUO/m1Jwl3ooclkZxr7zySDzY6jRAODlBnDpAA==",
+        "outputSchemaVersion": "ctf-oracle-result-1"
+      },
+      "key": {
+        "keyId": "local-oracle-key-v1",
+        "algorithm": "ed25519",
+        "publicKey": "MCowBQYDK2VwAyEAxjZltACPNhgdaQBCFuCzDHOT6s7mBPTjO8480Y5ci0k=",
+        "fingerprint": "c41c01d50d58f835332d85acf247a48159be93a9efc19d15b07dc43992976bc5",
+        "active": true
+      },
+      "registryDigest": "5d24d2a0f659ba95fb6ee1258919df2de93db5075a02bf7f26eb7b21a609184d"
+    },
+    {
+      "verified": true,
+      "result": {
+        "schemaVersion": "ctf-oracle-result-1",
+        "oracleId": "local-ooo-v1",
+        "runId": "local-ooo-run-v1",
+        "challengeId": "lactf-2026-rev-ooo",
+        "nonce": "local-ooo-nonce-v1",
+        "candidateDigest": "e3141ec1a67db9942ed43322c234029ef85554b7c5856d23dd5fe90ee152d33e",
+        "inputDigest": "7af73ab29d8346c25799c5b0521c99e7da53a6529a705970c939d33e151b7df5",
+        "verdict": "pass",
+        "verifierVersion": "gjc-ctf-local-oracle-v1",
+        "outputDigest": "92078ed0ef033ee4f616d3a150e63aef1b974f3c31788deec6e53ca8e34e06e8",
+        "sanitizedSummary": "candidate satisfied the source-bound local checker",
+        "signature": "JE3LoSswj6ozfhQL8hnMSrYcFlT57+WmaA8KEy8D7hB6sLcgaNzYFcgwVyYXoo1YluBFJAFMTBDtJTG9FzwWDw==",
+        "issuedAt": "2026-08-08T04:46:13.960Z"
+      },
+      "entry": {
+        "schemaVersion": "ctf-oracle-entry-1",
+        "oracleId": "local-ooo-v1",
+        "protocolVersion": "local-checker-v1",
+        "executableRef": "gjc-ctf-local:local-ooo-v1",
+        "imageDigest": "9718c0ff5f4420260802aa34e35a8c4b4bcf10096e555adc2931163a20463079",
+        "artifactDigest": "9718c0ff5f4420260802aa34e35a8c4b4bcf10096e555adc2931163a20463079",
+        "backendDigest": "9718c0ff5f4420260802aa34e35a8c4b4bcf10096e555adc2931163a20463079",
+        "allowedChallengeIds": [
+          "lactf-2026-rev-ooo"
+        ],
+        "publicKeyId": "local-oracle-key-v1",
+        "signerKeyId": "local-oracle-key-v1",
+        "signature": "9figRMAlsLSl86sz57bb4J5OQ9ysm8XCe5t5Zoe+ahb5dlWX2HowGM3JOAK40MQsq9PrnC98mI9YqgUC284wDA==",
+        "outputSchemaVersion": "ctf-oracle-result-1"
+      },
+      "key": {
+        "keyId": "local-oracle-key-v1",
+        "algorithm": "ed25519",
+        "publicKey": "MCowBQYDK2VwAyEAxjZltACPNhgdaQBCFuCzDHOT6s7mBPTjO8480Y5ci0k=",
+        "fingerprint": "c41c01d50d58f835332d85acf247a48159be93a9efc19d15b07dc43992976bc5",
+        "active": true
+      },
+      "registryDigest": "5d24d2a0f659ba95fb6ee1258919df2de93db5075a02bf7f26eb7b21a609184d"
+    },
+    {
+      "verified": true,
+      "result": {
+        "schemaVersion": "ctf-oracle-result-1",
+        "oracleId": "local-flag-finder-v1",
+        "runId": "local-flag-finder-run-v1",
+        "challengeId": "lactf-2026-rev-flag-finder",
+        "nonce": "local-flag-finder-nonce-v1",
+        "candidateDigest": "f8f6316385ae9df21b92f5f23a8f1188b0342ae148ec8eb018e8d26863123b78",
+        "inputDigest": "1504217f7283a68241e0db42cd2186c98fd371a0a318bd3717f0d6cd21888da8",
+        "verdict": "pass",
+        "verifierVersion": "gjc-ctf-local-oracle-v1",
+        "outputDigest": "9c14eeb9cf6eb2f1067c122f4e7b3f00e839fd898678333c56ab90ff04cb5ac2",
+        "sanitizedSummary": "candidate satisfied the source-bound local checker",
+        "signature": "+lVKvB/Kk5dTgx7OWTc4DgRy5q34NYnK0Uk3Lykq/hgPw+ELbHx9kvC+EsCawWCjHKAo0D7RISKHjcTM6qB1Dw==",
+        "issuedAt": "2026-08-08T04:46:13.960Z"
+      },
+      "entry": {
+        "schemaVersion": "ctf-oracle-entry-1",
+        "oracleId": "local-flag-finder-v1",
+        "protocolVersion": "local-checker-v1",
+        "executableRef": "gjc-ctf-local:local-flag-finder-v1",
+        "imageDigest": "b567ae53579e391a304c8eae8bfb293315ff36482eda62e11f8f2a0c1e4531cc",
+        "artifactDigest": "b567ae53579e391a304c8eae8bfb293315ff36482eda62e11f8f2a0c1e4531cc",
+        "backendDigest": "b567ae53579e391a304c8eae8bfb293315ff36482eda62e11f8f2a0c1e4531cc",
+        "allowedChallengeIds": [
+          "lactf-2026-rev-flag-finder"
+        ],
+        "publicKeyId": "local-oracle-key-v1",
+        "signerKeyId": "local-oracle-key-v1",
+        "signature": "bHmiqagAGF5l93ty2bPSWGPdKgFhFbod80S0oa/YiQZzfH/r3s3IXpmer5+VreQNP/MLWduHq7MlmeTlm02dBQ==",
+        "outputSchemaVersion": "ctf-oracle-result-1"
+      },
+      "key": {
+        "keyId": "local-oracle-key-v1",
+        "algorithm": "ed25519",
+        "publicKey": "MCowBQYDK2VwAyEAxjZltACPNhgdaQBCFuCzDHOT6s7mBPTjO8480Y5ci0k=",
+        "fingerprint": "c41c01d50d58f835332d85acf247a48159be93a9efc19d15b07dc43992976bc5",
+        "active": true
+      },
+      "registryDigest": "5d24d2a0f659ba95fb6ee1258919df2de93db5075a02bf7f26eb7b21a609184d"
+    }
+  ],
+  "evidenceDigest": "ca3ec07f815792987478223f6295becd1ecea8ece7017827097d0b0b56dc59b4"
+}

@@ -312,11 +312,11 @@ jobs:
          fail-fast: false
          matrix:
             include:
-               - { os: ubuntu-22.04, platform: linux, arch: x64, target_id: linux-x64, binary_path: packages/coding-agent/binaries/gjc-linux-x64 }
-               - { os: ubuntu-24.04-arm, platform: linux, arch: arm64, target_id: linux-arm64, binary_path: packages/coding-agent/binaries/gjc-linux-arm64 }
-               - { os: macos-14, platform: darwin, arch: arm64, target_id: darwin-arm64, binary_path: packages/coding-agent/binaries/gjc-darwin-arm64 }
-               - { os: macos-15-intel, platform: darwin, arch: x64, target_id: darwin-x64, binary_path: packages/coding-agent/binaries/gjc-darwin-x64 }
-               - { os: windows-latest, platform: win32, arch: x64, target_id: win32-x64, binary_path: packages/coding-agent/binaries/gjc-windows-x64.exe }
+               - { os: ubuntu-22.04, platform: linux, arch: x64, target_id: linux-x64, binary_path: packages/coding-agent/binaries/gjc-linux-x64, ctf_binary_path: packages/coding-agent/binaries/gjc-ctf-linux-x64 }
+               - { os: ubuntu-24.04-arm, platform: linux, arch: arm64, target_id: linux-arm64, binary_path: packages/coding-agent/binaries/gjc-linux-arm64, ctf_binary_path: packages/coding-agent/binaries/gjc-ctf-linux-arm64 }
+               - { os: macos-14, platform: darwin, arch: arm64, target_id: darwin-arm64, binary_path: packages/coding-agent/binaries/gjc-darwin-arm64, ctf_binary_path: packages/coding-agent/binaries/gjc-ctf-darwin-arm64 }
+               - { os: macos-15-intel, platform: darwin, arch: x64, target_id: darwin-x64, binary_path: packages/coding-agent/binaries/gjc-darwin-x64, ctf_binary_path: packages/coding-agent/binaries/gjc-ctf-darwin-x64 }
+               - { os: windows-latest, platform: win32, arch: x64, target_id: win32-x64, binary_path: packages/coding-agent/binaries/gjc-windows-x64.exe, ctf_binary_path: packages/coding-agent/binaries/gjc-ctf-windows-x64.exe }
       steps:
          - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
          - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
@@ -368,6 +368,8 @@ jobs:
               runtime_dir="$(mktemp -d)"
               HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --version
               HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --smoke-test
+              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.ctf_binary_path }}" --version
+              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.ctf_binary_path }}" --help
          - name: Smoke release binary (Windows)
            if: runner.os == 'Windows'
            shell: pwsh
@@ -378,11 +380,18 @@ jobs:
               $env:XDG_DATA_HOME = Join-Path $runtimeDir "xdg"
               & "${{ matrix.binary_path }}" --version
               & "${{ matrix.binary_path }}" --smoke-test
+              & "${{ matrix.ctf_binary_path }}" --version
+              & "${{ matrix.ctf_binary_path }}" --help
          - name: Upload release binary artifact
            uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
            with:
               name: gjc-binary-${{ matrix.target_id }}
               path: ${{ matrix.binary_path }}
+         - name: Upload CTF release binary artifact
+           uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+           with:
+              name: gjc-ctf-binary-${{ matrix.target_id }}
+              path: ${{ matrix.ctf_binary_path }}
 
    publish:
       if: ${{ startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch' }}
@@ -431,6 +440,12 @@ jobs:
            uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
            with:
               pattern: gjc-binary-*
+              path: release-binaries
+              merge-multiple: true
+         - name: Download CTF release binaries
+           uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+           with:
+              pattern: gjc-ctf-binary-*
               path: release-binaries
               merge-multiple: true
          - name: Create GitHub Release

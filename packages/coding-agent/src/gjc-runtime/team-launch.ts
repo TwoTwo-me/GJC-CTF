@@ -94,6 +94,7 @@ export function buildWorkerCommand(
 			? [envAssignment("GJC_TEAM_HEARTBEAT_STALE_MS", env.GJC_TEAM_HEARTBEAT_STALE_MS.trim())]
 			: []),
 	];
+	const workerSessionDir = path.join(config.state_root, config.team_name, "worker-sessions", worker.id);
 	const joined = envLines.join(" ");
 	const clearInheritedSession = config.gjc_session_id
 		? ""
@@ -101,8 +102,8 @@ export function buildWorkerCommand(
 			? "$env:GJC_SESSION_ID = $null; "
 			: "unset GJC_SESSION_ID; ";
 	if (platform === "win32")
-		return `& { ${clearInheritedSession}${joined} & ${config.worker_command} ${quote(prompt)} }`;
-	return `${clearInheritedSession}${joined} ${config.worker_command} ${quote(prompt)}`;
+		return `& { ${clearInheritedSession}${joined} & ${config.worker_command} --session-dir ${quote(workerSessionDir)} ${quote(prompt)} }`;
+	return `${clearInheritedSession}${joined} ${config.worker_command} --session-dir ${quote(workerSessionDir)} ${quote(prompt)}`;
 }
 
 interface GjcTmuxBinary {

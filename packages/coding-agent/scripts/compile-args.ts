@@ -36,6 +36,24 @@ export const releaseEntrypoints = [
 	// releases at startup (#1939). It is bundled via the statically-traceable
 	// `require("handlebars")` in packages/utils/src/prompt.ts instead.
 ];
+/** Assets bundled into the standalone CTF executable; kept separate from gjc.
+ * The CTF skill is statically imported with `{ type: "text" }`; listing the
+ * Markdown file as a second compile entrypoint changes Bun's module semantics. */
+export const releaseCtfEntrypoints = [
+	"./packages/coding-agent/bin/gjc-ctf.js",
+	"./packages/coding-agent/src/ctf/dashboard/dist/index.html",
+	"./packages/coding-agent/src/ctf/dashboard/dist/index.js",
+	"./packages/coding-agent/src/ctf/dashboard/dist/styles.css",
+	"./packages/coding-agent/src/ctf/dashboard/embedded-client.generated.txt",
+] as const;
+
+export const devCtfEntrypoints = [
+	"./bin/gjc-ctf.js",
+	"./src/ctf/dashboard/dist/index.html",
+	"./src/ctf/dashboard/dist/index.js",
+	"./src/ctf/dashboard/dist/styles.css",
+	"./src/ctf/dashboard/embedded-client.generated.txt",
+] as const;
 
 export const devEntrypoints = [
 	"./src/cli.ts",
@@ -54,6 +72,26 @@ export function buildReleaseCompileArgs(target: string, outfile: string): string
 		target,
 		defines: releaseDefineFlags,
 
+		externals: compiledExternalPackages,
+	});
+}
+export function buildReleaseCtfCompileArgs(target: string, outfile: string): string[] {
+	return buildCompileArgs({
+		root: ".",
+		entrypoints: [...releaseCtfEntrypoints],
+		outfile,
+		target,
+		defines: releaseDefineFlags,
+		externals: compiledExternalPackages,
+	});
+}
+
+export function buildDevCtfCompileArgs(outfile = "dist/gjc-ctf"): string[] {
+	return buildCompileArgs({
+		root: "../..",
+		entrypoints: [...devCtfEntrypoints],
+		outfile,
+		defines: devDefineFlags,
 		externals: compiledExternalPackages,
 	});
 }
