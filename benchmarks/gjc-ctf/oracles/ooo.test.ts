@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
+import { analyzeOooRecurrenceSource } from "../../../packages/coding-agent/src/ctf/solver/analyzers/ooo-recurrence";
 import { verifyOooCandidate } from "./ooo";
 
 const operations = `def о(a, b):
@@ -76,6 +77,34 @@ describe("ooo local oracle", () => {
 	test("rejects incorrect and short candidates", () => {
 		expect(verify("dce").verdict).toBe("fail");
 		expect(verify("dd").verdict).toBe("fail");
+	});
+
+	test("differentially accepts analyzer output across fresh checker fixtures", () => {
+		const candidates = [
+			"lactf{a}",
+			"lactf{synthetic-ooo-01}",
+			"lactf{mixed_123_symbols!?}",
+			"lactf{accent-é}",
+			"lactf{astral-😀}",
+		];
+
+		for (const candidate of candidates) {
+			const codePoints = Array.from(candidate, character => character.codePointAt(0) as number);
+			const constants = [...codePoints.slice(0, -1).map((value, index) => value + codePoints[index + 1]), 0];
+			const checkerSource = reviewedSource(constants);
+			const analysis = analyzeOooRecurrenceSource(checkerSource);
+
+			expect(analysis.ok).toBe(true);
+			if (!analysis.ok) continue;
+			expect(analysis.candidate).toBe(candidate);
+			expect(
+				verifyOooCandidate({
+					source: checkerSource,
+					candidate: analysis.candidate,
+					expectedSourceDigest: sha256(checkerSource),
+				}).verdict,
+			).toBe("pass");
+		}
 	});
 
 	test("binds verification to the reviewed source bytes", () => {
