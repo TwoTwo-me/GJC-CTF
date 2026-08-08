@@ -21,9 +21,19 @@ The parser recognizes these commands:
 | `bootstrap [--category CATEGORY...] [--apply] [--json]` | Audits reviewed tool profiles. `--apply` requires an explicit category, invokes one exact package-manager argv, and re-verifies installed binaries. |
 | `challenge add ...` | Requires the basic registration flags plus `--descriptor-json PATH` containing validated limits, calibration, safety, backend, and artifact-allowlist metadata; missing or malformed metadata is a usage refusal. Registration still requires a skill-bearing manifest. |
 | `solve CHALLENGE_ID... [--concurrency N] [--budget-ms N] [--backend ID]` | Schedules bounded parallel candidate runs when an owning integration supplies a registered backend and authority. The stock CLI supplies neither and records unavailable evidence instead of a solved claim. |
+| `stats inspect --input PATH [--json]` | Validates and renders one explicit active v2 LA CTF diagnostic observation. It is read-only, candidate-free, unscored, and cannot generate, seal, compare, or promote evidence. |
 | `resume ...` | **Unavailable.** The command validates its run id and reads its durable owner record, then refuses because durable solver resume is not configured. |
 
 Unknown commands and malformed command forms are usage errors (exit code 2). Workspace errors are printed as `gjc-ctf: ...`; retryable workspace errors use exit code 75, and non-retryable workspace errors use exit code 1. A refusal is not success.
+
+## Inspect version statistics
+
+```sh
+gjc-ctf stats inspect --input artifacts/ctf/lactf-version-observation-v2.json
+gjc-ctf stats inspect --input artifacts/ctf/lactf-version-observation-v2.json --json
+```
+
+The command requires exactly one input path and validates the complete document before writing output. It accepts only `gjc-ctf-version-observation-2` with an active machine-registered digest, valid invalidation lineage, unique version IDs, zero independently verified solves, unavailable comparison, and unscored Tier 2-locked status. Invalid JSON, extra fields, generic self-sealed statistics, revoked observations, or digest mismatches return exit code 2 with a sanitized message and no raw input.
 
 ## Initialize twice
 

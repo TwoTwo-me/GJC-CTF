@@ -103,7 +103,20 @@ bun packages/coding-agent/bin/gjc-ctf.js dashboard --port 0
 
 The CLI can schedule bounded candidate work, but its stock invocation injects no backend, permission authority, calibration, runtime preflight, or independent oracle. It therefore refuses rather than claiming a solve. There is no CLI command that makes a candidate verified or expands a tier.
 
-Programmatic campaign execution composes `createProductionGjcLocalSolverSessionFactory`, optional reviewed analyzers (including `createRegexGridAnalyzer`), `createLocalCtfSolverBackend`, and `runCtfCampaign`. The caller supplies pinned `CorpusEntry` values, a confined materializer, exact descriptors, run authority, state root, concurrency, wall budget, and attempt cap. The adapter receives only digest-bound materialized allowlisted files, has no challenge-visible tools, network, credentials, hidden metadata, archive flags, or solve scripts, and emits strict unverified candidate JSON. Routes are fixed by category: misc/reverse/crypto use offline checkers, pwn uses a process-service adapter, web uses a browser-session adapter; only `flag-finder` has the reviewed `regex-grid` analyzer route. Those routes are not authorization to contact a remote challenge host.
+Programmatic campaign execution composes `createProductionGjcLocalSolverSessionFactory`, reviewed analyzers, `createLocalCtfSolverBackend`, and `runCtfCampaign`. The caller supplies pinned `CorpusEntry` values, a confined materializer, exact descriptors, run authority, state root, concurrency, wall budget, and attempt cap. The AgentSession receives only digest-bound materialized allowlisted files, no challenge-visible generic tools, no credentials, no hidden metadata, no archive flags, and no solve scripts; it can emit only an unverified candidate.
+
+Routes are fixed by category. Offline misc/reverse/crypto routes can use reviewed analyzers before the AgentSession fallback. Dynamic pwn and web routes additionally require one trusted provider bound to the exact challenge ID, route digest, and adapter kind. The process capability exposes only bounded send/receive/restart operations; the browser capability exposes only bounded actions against provider-owned local paths. Missing, duplicate, mismatched, timed-out, or cancelled providers fail before AgentSession creation. Every provider is closed on all terminal paths. Adapter observations and exit or HTTP status never create a candidate or verified outcome, and the providers do not authorize remote challenge contact.
+
+## Version statistics inspection
+
+Validate and inspect the active candidate-free diagnostic observation with an explicit path:
+
+```sh
+gjc-ctf stats inspect --input artifacts/ctf/lactf-version-observation-v2.json
+gjc-ctf stats inspect --input artifacts/ctf/lactf-version-observation-v2.json --json
+```
+
+Inspection is read-only and accepts only the strict active `gjc-ctf-version-observation-2` contract after revocation, invalidation-lineage, uniqueness, and canonical-digest checks. It reports zero independently verified solves, unavailable benchmark comparison, unscored status, and locked Tier 2 exactly as recorded. It does not generate, rewrite, seal, score, compare, or promote evidence; generic self-sealed version-stat files are rejected.
 
 ## Safety and unavailable authority
 

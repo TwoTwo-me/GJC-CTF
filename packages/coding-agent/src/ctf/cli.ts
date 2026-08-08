@@ -10,9 +10,10 @@ import {
 	TrustedOracleRegistryV1Schema,
 } from "./contracts";
 import { CtfError, errorEnvelope } from "./contracts/errors";
-import { createCtfWorkspaceDashboardProjectionReader, readCtfDashboardSnapshot } from "./dashboard/projection-reader";
 import embeddedDashboardArchive from "./dashboard/embedded-client.generated.txt" with { type: "text" };
+import { createCtfWorkspaceDashboardProjectionReader, readCtfDashboardSnapshot } from "./dashboard/projection-reader";
 import { startCtfDashboard } from "./dashboard/server";
+import { validateLactfVersionStatisticsArtifact } from "./evidence/version-observation";
 import {
 	type CtfRunMode,
 	createUnavailableRun,
@@ -32,7 +33,16 @@ const VERSION = packageJson.version;
 export const CTF_BIN_NAME = "gjc-ctf" as const;
 export const CTF_DASHBOARD_EMBEDDED_ARCHIVE = embeddedDashboardArchive;
 
-export const CTF_COMMANDS = ["init", "challenge add", "solve", "status", "dashboard", "resume", "bootstrap"] as const;
+export const CTF_COMMANDS = [
+	"init",
+	"challenge add",
+	"solve",
+	"status",
+	"dashboard",
+	"resume",
+	"bootstrap",
+	"stats inspect",
+] as const;
 export type CtfCommand = (typeof CTF_COMMANDS)[number];
 export type CtfCliInvocation =
 	| { kind: "help" }
@@ -71,6 +81,7 @@ export function renderCtfHelp(): string {
 		`  ${CTF_BIN_NAME} dashboard [--port PORT]`,
 		`  ${CTF_BIN_NAME} bootstrap [--category CATEGORY...] [--apply] [--json]`,
 		`  ${CTF_BIN_NAME} resume [RUN_ID] [--json]`,
+		`  ${CTF_BIN_NAME} stats inspect --input PATH [--json]`,
 		"",
 		"Options:",
 		`  -h, --help       Show this help`,
@@ -86,6 +97,8 @@ function parseCommand(argv: readonly string[]): { command: CtfCommand; args: rea
 	const [first, second, ...rest] = argv;
 	if (first === "challenge" && second === "add") return { command: "challenge add", args: rest };
 	if (first === "challenge") throw new CtfUsageError('Expected "challenge add".');
+	if (first === "stats" && second === "inspect") return { command: "stats inspect", args: rest };
+	if (first === "stats") throw new CtfUsageError('Expected "stats inspect".');
 	if (first === undefined) throw new CtfUsageError(`A command is required. Use ${CTF_BIN_NAME} --help for usage.`);
 	if ((CTF_COMMANDS as readonly string[]).includes(first))
 		return {
@@ -142,6 +155,40 @@ function requiredUniqueFlag(args: readonly string[], name: string): string {
 
 function wantsJson(args: readonly string[]): boolean {
 	return args.includes("--json");
+}
+export function parseStatsInspectCommandArgs(args: readonly string[]): Readonly<{ input: string; json: boolean }> {
+	let input: string | undefined;
+	let json = false;
+	for (let index = 0; index < args.length; index += 1) {
+		const argument = args[index];
+		if (argument === "--input") {
+			if (input !== undefined) throw new CtfUsageError("--input may be specified only once.");
+			const path = args[++index];
+			if (!path || path.startsWith("--")) throw new CtfUsageError("Missing required --input.");
+			input = path;
+			continue;
+		}
+		if (argument === "--json") {
+			if (json) throw new CtfUsageError("--json may be specified only once.");
+			json = true;
+			continue;
+		}
+		throw new CtfUsageError(`Unknown stats inspect argument "${argument ?? ""}".`);
+	}
+	if (input === undefined) throw new CtfUsageError("Missing required --input.");
+	return { input, json };
+}
+
+function renderStatsInspection(observation: ReturnType<typeof validateLactfVersionStatisticsArtifact>): string {
+	return `${[
+		"LA CTF version statistics inspection",
+		`Versions inspected: ${observation.versions.length}`,
+		"Independently verified solves: 0",
+		"Status: unscored diagnostic observation",
+		"Comparison: unavailable",
+		"Tier 2: unauthorized",
+		`Limitations: ${observation.limitations.length} recorded; no benchmark comparison is available.`,
+	].join("\n")}\n`;
 }
 const BOOTSTRAP_CATEGORIES = [
 	"essential",
@@ -354,6 +401,19 @@ function writeJsonError(error: unknown): void {
 }
 
 async function runCommand(command: CtfCommand, args: readonly string[], runtime: CtfCliRuntime): Promise<void> {
+	if (command === "stats inspect") {
+		const parsed = parseStatsInspectCommandArgs(args);
+		let observation: ReturnType<typeof validateLactfVersionStatisticsArtifact>;
+		try {
+			observation = validateLactfVersionStatisticsArtifact(
+				JSON.parse(await readFile(parsed.input, "utf8")) as unknown,
+			);
+		} catch {
+			throw new CtfUsageError("Stats inspection input is not a valid active v2 diagnostic observation.");
+		}
+		process.stdout.write(parsed.json ? `${JSON.stringify(observation)}\n` : renderStatsInspection(observation));
+		return;
+	}
 	if (command === "bootstrap") {
 		const parsed = parseBootstrapCommandArgs(args);
 		const result =
