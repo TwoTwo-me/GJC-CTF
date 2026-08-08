@@ -8,6 +8,7 @@
 - Added a tool-free production GJC AgentSession solver adapter and digest-sealed resumable local campaign controller with bounded parallel attempts, provenance-bound visible inputs, durable candidate/unknown/failure retention, cancellation, and a fixed `2026-08-09T00:00:00Z` hard stop.
 - Added a reviewed, bounded Z3 regex-grid analyzer and ordered analyzer seam for local candidate campaigns; unsupported inputs fall through to the isolated AgentSession, while derived bitmaps remain unverified candidates.
 - Hardened CTF releases with a packaged immutable dashboard archive, compiled-binary dashboard smoke coverage, complete platform asset checks, source-pinned Windows bootstrap discovery, anchored split-key oracle authority, immutable corpus blob materialization, bounded authority cancellation, machine-readable evidence revocation, and identity-bound version statistics.
+- Added exact route-bound, bounded local process/browser adapter capabilities for dynamic CTF attempts and a read-only `gjc-ctf stats inspect` command for active candidate-free version observations.
 
 ### Added
 
