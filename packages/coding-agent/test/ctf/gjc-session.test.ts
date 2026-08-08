@@ -26,6 +26,18 @@ function assistant(text: string): AssistantMessage {
 		},
 	};
 }
+function challElf(): Uint8Array {
+	const bytes = new Uint8Array(64);
+	const view = new DataView(bytes.buffer);
+	bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]);
+	view.setUint16(16, 3, true);
+	view.setUint16(18, 62, true);
+	view.setUint32(20, 1, true);
+	view.setBigUint64(32, 0n, true);
+	view.setUint16(52, 64, true);
+	view.setUint16(54, 56, true);
+	return bytes;
+}
 
 function input(
 	challengeId = "lactf-2026-misc-endians",
@@ -127,8 +139,10 @@ describe("GJC local solver AgentSession adapter", () => {
 		const calls: string[] = [];
 		const sent: Uint8Array[] = [];
 		const received = Uint8Array.from([0, 255, 1, 2]);
+		const visibleElf = challElf();
 		const processInput = {
 			...input("lactf-2026-pwn-tic-tac-no"),
+			visibleFiles: [{ path: "chall", content: visibleElf }],
 			evaluationAdapter: {
 				adapterKind: "process-service" as const,
 				process: {
@@ -161,6 +175,7 @@ describe("GJC local solver AgentSession adapter", () => {
 							const send = tools[0] as any;
 							const receive = tools[1] as any;
 							const restart = tools[2] as any;
+							const inspect = tools[3] as any;
 							await expect(send.execute("send", { contentBase64: "" })).resolves.toMatchObject({
 								content: [{ text: "sent" }],
 							});
@@ -205,6 +220,14 @@ describe("GJC local solver AgentSession adapter", () => {
 							};
 							await expect(receive.execute("receive", {})).rejects.toThrow("byte bound");
 							await restart.execute("restart", {});
+							visibleElf.fill(0);
+							const inspection = await inspect.execute("inspect", {});
+							expect(JSON.parse(inspection.content[0]?.text ?? "")).toMatchObject({
+								class: "ELF64",
+								machine: "x86-64",
+								mitigations: { pie: "unknown" },
+							});
+							await expect(inspect.execute("inspect", { extra: true })).rejects.toThrow();
 						},
 					},
 				};
@@ -217,6 +240,7 @@ describe("GJC local solver AgentSession adapter", () => {
 			"ctf_process_send_base64",
 			"ctf_process_receive_base64",
 			"ctf_process_restart",
+			"ctf_elf_inspect",
 		]);
 		expect(sent.map(content => [...content])).toEqual([
 			[],
@@ -254,6 +278,7 @@ describe("GJC local solver AgentSession adapter", () => {
 		})({});
 		const cleanupInput = {
 			...input("lactf-2026-pwn-tic-tac-no"),
+			visibleFiles: [{ path: "chall", content: challElf() }],
 			evaluationAdapter: {
 				adapterKind: "process-service" as const,
 				process: { send: async () => {}, receive: async () => new Uint8Array(), restart: async () => {} },

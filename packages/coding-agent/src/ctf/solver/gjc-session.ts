@@ -8,6 +8,7 @@ import type { CustomTool } from "../../extensibility/custom-tools/types";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "../../sdk/session";
 import type { AgentSession, PromptOptions } from "../../session/agent-session";
 import { SessionManager } from "../../session/session-manager";
+import { inspectElf64X86_64 } from "./elf-inspection";
 import type {
 	LocalSolverSession,
 	LocalSolverSessionInput,
@@ -15,6 +16,7 @@ import type {
 	LocalSolverSessionResult,
 } from "./local-backend";
 import localSolverPrompt from "./local-solver-prompt.md" with { type: "text" };
+import { solverRouteFor } from "./router";
 
 const MAX_PROMPT_BYTES = 512 * 1024;
 const MAX_CANDIDATE_BYTES = 64 * 1024;
@@ -197,12 +199,40 @@ function processTools(input: LocalSolverSessionInput): CustomTool[] {
 			name: "ctf_process_restart",
 			label: "CTF Process Restart",
 			description: "Restart the reviewed local process service.",
-			parameters: z.object({}),
-			async execute() {
+			parameters: z.object({}).strict(),
+			async execute(_toolCallId, params) {
 				assertActive();
+				z.object({}).strict().parse(params);
 				await adapter.process.restart();
 				assertActive();
 				return { content: [{ type: "text", text: "restarted" }] };
+			},
+		},
+	];
+}
+function elfInspectionTool(input: LocalSolverSessionInput): CustomTool[] {
+	const route = solverRouteFor("lactf-2026-pwn-tic-tac-no");
+	if (
+		input.challengeId !== route.challengeId ||
+		input.routeDigest !== route.routeDigest ||
+		input.adapterKind !== "process-service"
+	)
+		return [];
+	if (input.visibleFiles.length !== 1 || input.visibleFiles[0]?.path !== "chall")
+		throw new Error("reviewed ELF input is unavailable");
+	const chall = input.visibleFiles[0];
+	return [
+		{
+			name: "ctf_elf_inspect",
+			label: "CTF ELF Inspect",
+			description: "Inspect the reviewed local ELF bytes without executing them.",
+			parameters: z.object({}).strict(),
+			async execute(_toolCallId, params) {
+				if (input.signal.aborted) throw new Error("local solver attempt was cancelled");
+				z.object({}).strict().parse(params);
+				const inspection = inspectElf64X86_64(chall.content);
+				if (input.signal.aborted) throw new Error("local solver attempt was cancelled");
+				return { content: [{ type: "text", text: JSON.stringify(inspection) }] };
 			},
 		},
 	];
@@ -212,19 +242,30 @@ async function solveWithAgent(
 	input: LocalSolverSessionInput,
 	options: GjcLocalSolverSessionOptions,
 ): Promise<LocalSolverSessionResult> {
-	if (input.network !== "off" || input.credentials !== "none" || input.allowedTools.length !== 0)
+	const ownedInput: LocalSolverSessionInput = Object.freeze({
+		...input,
+		visibleFiles: Object.freeze(
+			input.visibleFiles.map(file =>
+				Object.freeze({
+					path: file.path,
+					content: new Uint8Array(file.content),
+				}),
+			),
+		),
+	});
+	if (ownedInput.network !== "off" || ownedInput.credentials !== "none" || ownedInput.allowedTools.length !== 0)
 		throw new Error("local agent session authority is not clean-room compatible");
-	assertReviewedAuthority(input, options);
+	assertReviewedAuthority(ownedInput, options);
 	const cwd = await fs.mkdtemp(`${os.tmpdir()}/gjc-local-solver-`);
 	let session: LocalAgentSession | undefined;
 	try {
 		const created = await options.createSession({
 			cwd,
-			modelPattern: input.modelPattern,
-			thinkingLevel: input.thinkingLevel === "high" ? AgentThinkingLevel.High : AgentThinkingLevel.Medium,
+			modelPattern: ownedInput.modelPattern,
+			thinkingLevel: ownedInput.thinkingLevel === "high" ? AgentThinkingLevel.High : AgentThinkingLevel.Medium,
 			systemPrompt: [localSolverPrompt],
 			toolNames: [],
-			customTools: processTools(input),
+			customTools: [...processTools(ownedInput), ...elfInspectionTool(ownedInput)],
 			skills: [],
 			rules: [],
 			contextFiles: [],
@@ -245,18 +286,18 @@ async function solveWithAgent(
 		});
 		const acquiredSession = created.session;
 		session = acquiredSession;
-		if (input.signal.aborted) throw new Error("local solver attempt was cancelled");
+		if (ownedInput.signal.aborted) throw new Error("local solver attempt was cancelled");
 		const abort = () => {
 			void acquiredSession
-				.abort({ goalReason: "internal", timeoutMs: 1_000, cause: input.signal.reason })
+				.abort({ goalReason: "internal", timeoutMs: 1_000, cause: ownedInput.signal.reason })
 				.catch(() => undefined);
 		};
-		input.signal.addEventListener("abort", abort, { once: true });
-		if (input.signal.aborted) abort();
+		ownedInput.signal.addEventListener("abort", abort, { once: true });
+		if (ownedInput.signal.aborted) abort();
 		try {
 			const promptOptions: PromptOptions = { expandPromptTemplates: false, attribution: "agent" };
-			await acquiredSession.prompt(renderVisibleInput(input), promptOptions);
-			if (input.signal.aborted) throw new Error("local solver attempt was cancelled");
+			await acquiredSession.prompt(renderVisibleInput(ownedInput), promptOptions);
+			if (ownedInput.signal.aborted) throw new Error("local solver attempt was cancelled");
 			const parsed = parseResult(acquiredSession.getLastAssistantMessage());
 			if (parsed.candidate === "") return {};
 			return {
@@ -265,7 +306,7 @@ async function solveWithAgent(
 					parsed.notes === "" ? [] : [{ path: "analysis.txt", content: new TextEncoder().encode(parsed.notes) }],
 			};
 		} finally {
-			input.signal.removeEventListener("abort", abort);
+			ownedInput.signal.removeEventListener("abort", abort);
 		}
 	} finally {
 		try {
