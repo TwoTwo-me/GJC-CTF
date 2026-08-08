@@ -880,13 +880,11 @@ describe("benchmark contracts", () => {
 			...oracleOnlyCapability,
 			reviewedImplementationIdentities: [identity],
 		};
+		const requestOnlyReview = { ...request, reviewedImplementationIdentities: [identity] };
 
 		expectCtfCode(() => preflightBenchmark(request), "benchmark_provenance_missing");
 		expectCtfCode(() => preflightBenchmark(request, oracleOnlyCapability), "benchmark_provenance_missing");
-		expectCtfCode(
-			() => preflightBenchmark({ ...request, reviewedImplementationIdentities: [identity] }, oracleOnlyCapability),
-			"benchmark_provenance_missing",
-		);
+		expectCtfCode(() => preflightBenchmark(requestOnlyReview, oracleOnlyCapability), "benchmark_provenance_missing");
 		expectCtfCode(
 			() =>
 				preflightBenchmark({ ...request, implementationIdentity: { ...identity, unexpected: DIGEST } }, capability),
