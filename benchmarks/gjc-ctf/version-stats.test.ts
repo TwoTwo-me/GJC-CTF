@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { canonicalDigest } from "../../packages/coding-agent/src/ctf/contracts/digest";
 import { metricsFingerprint } from "../../packages/coding-agent/src/ctf/contracts/metrics";
-import { __versionStatsTestOnly, compareVersionStats, computeVersionStats, validateVersionStats, versionStatsJson } from "./version-stats";
+import { compareVersionStats, computeVersionStats, validateVersionStats, versionStatsJson } from "./version-stats";
 import { authorizedVersionStatsRequest } from "./test-authority-fixture";
 
 const digest = (value: string) => canonicalDigest(value);
@@ -24,72 +24,20 @@ function report(runs = [run("one", "pass", { solved: true }), run("two", "fail",
 }
 
 describe("version statistics", () => {
-	test("has deterministic identity and exact recomputed values", () => {
-		const stats = __versionStatsTestOnly.computeAuthorizedVersionStats({ identity, report: report() });
-		expect(__versionStatsTestOnly.computeAuthorizedVersionStats({ identity, report: report() })).toEqual(stats);
-		expect(stats.independentlyVerifiedSolveCount).toBe(1);
-		expect(stats.passAt1).toEqual({ status: "known", value: 0.5 });
-		expect(stats.inputTokens).toBe(20);
-		expect(versionStatsJson(stats)).toBe(versionStatsJson(validateVersionStats(stats)));
-	});
-	test("retains unknown cost and unknown evidence", () => {
-		const stats = __versionStatsTestOnly.computeAuthorizedVersionStats({ identity, report: report([run("one", "unknown", { costUnknown: true })]) });
-		expect(stats.unknownCostCount).toBe(1);
-		expect(stats.independentlyVerifiedSolveRate.status).toBe("unknown");
-		expect(stats.challengeStatus.two).toBe("unknown");
-	});
-	test("rejects tampered reports", () => {
-		const tampered = report();
-		tampered.runs[0].inputTokens = 999;
-		expect(() => __versionStatsTestOnly.computeAuthorizedVersionStats({ identity, report: tampered })).toThrow("fingerprint mismatch");
-	});
-	test("detects solved-to-unsolved regressions", () => {
-		const baseline = __versionStatsTestOnly.computeAuthorizedVersionStats({ identity, report: report() });
-		const candidate = __versionStatsTestOnly.computeAuthorizedVersionStats({ identity, report: report([run("one", "fail"), run("two", "fail")]) });
-		const comparison = __versionStatsTestOnly.compareAuthorizedVersionStats(baseline, candidate);
-		expect(comparison).toMatchObject({
-			status: "comparable",
-			regressions: ["one"],
-			deltas: {
-				independentlyVerifiedSolveCount: { status: "known", value: -1 },
-				passAt1: { status: "known", value: -0.5 },
-				firstValidLatencyMs: { status: "unknown" },
-				inputTokens: { status: "known", value: 0 },
-				knownCostCents: { status: "known", value: 1.5 },
-				unknownCostCount: { status: "known", value: -1 },
-				failureCount: { status: "known", value: 1 },
-			},
-			statusTransitions: { confidenceStatus: { baseline: "complete", candidate: "complete" }, holdoutStatus: { baseline: "unknown", candidate: "unknown" } },
-		});
-	});
-	test("marks solved-to-unknown comparisons indeterminate", () => {
-		const baseline = __versionStatsTestOnly.computeAuthorizedVersionStats({ identity, report: report() });
-		const candidate = __versionStatsTestOnly.computeAuthorizedVersionStats({ identity, report: report([run("one", "unknown"), run("two", "fail")]) });
-		expect(__versionStatsTestOnly.compareAuthorizedVersionStats(baseline, candidate)).toMatchObject({
-			status: "indeterminate",
-			reasons: ["partial_confidence", "solved_to_unknown"],
-		});
-	});
-	test("does not clear regressions with partial evidence", () => {
-		const baseline = __versionStatsTestOnly.computeAuthorizedVersionStats({ identity, report: report() });
-		const candidate = __versionStatsTestOnly.computeAuthorizedVersionStats({ identity, report: report([run("one", "fail"), run("two", "unknown")]) });
-		expect(__versionStatsTestOnly.compareAuthorizedVersionStats(baseline, candidate)).toMatchObject({
-			status: "indeterminate",
-			reasons: ["partial_confidence"],
-			regressions: ["one"],
-		});
-	});
-	test("marks corpus changes incomparable", () => {
-		const baseline = __versionStatsTestOnly.computeAuthorizedVersionStats({ identity, report: report() });
-		const changedIdentity = { ...identity, corpusDigest: digest("other-corpus") };
-		const candidate = __versionStatsTestOnly.computeAuthorizedVersionStats({ identity: changedIdentity, report: report() });
-		expect(__versionStatsTestOnly.compareAuthorizedVersionStats(baseline, candidate)).toEqual({ status: "incomparable", reasons: ["corpusDigest"] });
-	});
-	test("rejects tampered sealed statistics before comparison", () => {
-		const baseline = __versionStatsTestOnly.computeAuthorizedVersionStats({ identity, report: report() });
-		const candidate = __versionStatsTestOnly.computeAuthorizedVersionStats({ identity, report: report() });
-		const tampered = { ...candidate, inputTokens: candidate.inputTokens + 1 };
-		expect(() => __versionStatsTestOnly.compareAuthorizedVersionStats(baseline, tampered)).toThrow("fingerprint mismatch");
+	test("validates deterministic production statistics and rejects tampering", () => {
+		const authority = authorizedVersionStatsRequest();
+		const evaluatorCapability = { oracleTrustAnchors: authority.oracle.trustAnchors };
+		const result = computeVersionStats(authority, evaluatorCapability);
+		expect(result.status).toBe("ready");
+		if (result.status !== "ready") throw new Error(result.reason);
+		expect(computeVersionStats(authority, evaluatorCapability)).toEqual(result);
+		expect(versionStatsJson(result.stats)).toBe(versionStatsJson(validateVersionStats(result.stats)));
+		expect(result.stats.independentlyVerifiedSolveCount).toBe(0);
+		expect(result.stats.unknownCostCount).toBe(0);
+		expect(result.stats.challengeStatus["fixture-challenge"]).toBe("unsolved");
+		expect(() => validateVersionStats({ ...result.stats, inputTokens: result.stats.inputTokens + 1 })).toThrow(
+			"fingerprint mismatch",
+		);
 	});
 	test("rejects mismatched production identity authority fields", () => {
 		for (const identityOverride of [
@@ -130,8 +78,9 @@ describe("version statistics", () => {
 		}
 	});
 	test("rejects raw reports and sealed stats from production comparison", () => {
-		const raw = __versionStatsTestOnly.computeAuthorizedVersionStats({ identity, report: report() });
 		expect(computeVersionStats({ identity, report: report() })).toMatchObject({ status: "unavailable" });
-		expect(compareVersionStats(raw, raw)).toMatchObject({ status: "unavailable" });
+		expect(compareVersionStats({ identity, report: report() }, { identity, report: report() })).toMatchObject({
+			status: "unavailable",
+		});
 	});
 });

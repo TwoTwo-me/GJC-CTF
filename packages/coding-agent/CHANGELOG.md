@@ -14,6 +14,7 @@
 - CTF bootstrap now binds probes, installers, and elevation to revalidated canonical executable identities from trusted absolute roots, and can seal exact route/tool readiness as an unscored `SolverCapabilityClosureV1`.
 - Local CTF evaluation can now emit a redacted, fresh-instance-bound V2 oracle receipt under external split-key trust anchors and durably attach it to the live run fence as verified evidence pending separate score authority.
 - Replaced optimizer-local aggregate promotion with a digest-sealed blinded round: independently signed training selection, one signed holdout look, explicit zero-look unavailable closure, module-confined promotion authority, replay-safe finalization, and redacted bounded failure continuation.
+- Removed the production-exported raw version-statistics aggregation seam; version statistics and comparisons now enter only through the complete evaluator-authorized request path.
 
 ### Added
 

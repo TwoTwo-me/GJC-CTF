@@ -305,5 +305,3 @@ export function compareVersionStats(
 	if (candidate.status !== "ready") return { status: "unavailable", reason: `candidate: ${candidate.reason}` };
 	return compareAuthorizedVersionStats(baseline.stats, candidate.stats);
 }
-/** @internal Test-only authority-bypassing aggregation and comparison seams. */
-export const __versionStatsTestOnly = Object.freeze({ computeAuthorizedVersionStats, compareAuthorizedVersionStats });
