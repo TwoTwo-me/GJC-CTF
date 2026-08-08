@@ -98,6 +98,10 @@ describe("GJC local solver AgentSession adapter", () => {
 		});
 		expect(options?.toolNames).toEqual([]);
 		expect(options?.customTools).toEqual([]);
+		expect(options?.systemPrompt).toEqual([
+			expect.stringContaining("Some reviewed routes provide narrow local tools"),
+		]);
+		expect(options?.systemPrompt?.join("\n")).not.toContain("You have no tools");
 		expect(options?.modelPattern).toBe(reviewed.modelPattern);
 		expect(options?.thinkingLevel).toBe(
 			reviewed.thinkingLevel === "high" ? AgentThinkingLevel.High : AgentThinkingLevel.Medium,
