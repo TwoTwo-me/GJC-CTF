@@ -56,6 +56,7 @@ function input(
 		modelPattern: route.modelPattern,
 		thinkingLevel: route.thinkingLevel,
 		attemptLimits: route.attemptLimits,
+		attempt: 1,
 		visibleFiles: [{ path: "main.c", content: new TextEncoder().encode("int main(void) { return 0; }") }],
 		runCapability: {
 			writeScratch: async () => {},

@@ -40,6 +40,7 @@ describe("Endians analyzer", () => {
 			modelPattern: route.modelPattern,
 			thinkingLevel: route.thinkingLevel,
 			attemptLimits: route.attemptLimits,
+			attempt: 1,
 			visibleFiles: [{ path: "chall.txt", content: source }],
 			runCapability: {
 				writeScratch: async () => {},

@@ -74,6 +74,7 @@ describe("OOO recurrence analyzer", () => {
 			modelPattern: route.modelPattern,
 			thinkingLevel: route.thinkingLevel,
 			attemptLimits: route.attemptLimits,
+			attempt: 1,
 			visibleFiles: [{ path: "ooo.py", content: new TextEncoder().encode(source) }],
 			runCapability: {
 				writeScratch: async () => {},
