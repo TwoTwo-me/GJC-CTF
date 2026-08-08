@@ -53,6 +53,12 @@ describe("local GJC solver backend", () => {
 					}),
 				],
 			]),
+			analyzers: [
+				{
+					id: "not-so-lazy-trigrams",
+					analyze: async () => ({ status: "not-applicable" }),
+				},
+			],
 			createSession: async () => ({
 				solve: async input => {
 					seen.push(input);
