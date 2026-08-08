@@ -91,10 +91,8 @@
 	},
 	"files": [
 		"src",
-		"src/ctf/dashboard/dist",
 		"src/ctf/dashboard/embedded-client.generated.txt",
 		"docs/gjc-ctf",
-		"dist/gjc-ctf",
 		"bin",
 		"bin/gjc-ctf.js",
 		"scripts",

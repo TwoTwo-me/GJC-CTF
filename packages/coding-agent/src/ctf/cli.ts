@@ -11,6 +11,7 @@ import {
 } from "./contracts";
 import { CtfError, errorEnvelope } from "./contracts/errors";
 import { createCtfWorkspaceDashboardProjectionReader, readCtfDashboardSnapshot } from "./dashboard/projection-reader";
+import embeddedDashboardArchive from "./dashboard/embedded-client.generated.txt" with { type: "text" };
 import { startCtfDashboard } from "./dashboard/server";
 import {
 	type CtfRunMode,
@@ -29,6 +30,7 @@ import {
 
 const VERSION = packageJson.version;
 export const CTF_BIN_NAME = "gjc-ctf" as const;
+export const CTF_DASHBOARD_EMBEDDED_ARCHIVE = embeddedDashboardArchive;
 
 export const CTF_COMMANDS = ["init", "challenge add", "solve", "status", "dashboard", "resume", "bootstrap"] as const;
 export type CtfCommand = (typeof CTF_COMMANDS)[number];
@@ -549,6 +551,8 @@ async function runCommand(command: CtfCommand, args: readonly string[], runtime:
 			port,
 			projectionReader,
 			stateIdentity: { competitionId: workspace.manifest.competitionId, stateRoot: workspace.stateRoot },
+			embeddedArchive: CTF_DASHBOARD_EMBEDDED_ARCHIVE,
+			buildClient: false,
 		});
 		process.stdout.write(
 			`${JSON.stringify({ schemaVersion: "ctf-cli-1", url: handle.url, port: handle.port, readOnly: true })}\n`,

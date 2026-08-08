@@ -140,6 +140,7 @@ describe("release build compile args", () => {
 		const workflow = await Bun.file(path.join(repoRoot, ".github", "workflows", "ci.yml")).text();
 		expect(workflow).toContain("ctf_binary_path:");
 		expect(workflow).toContain('"${{ matrix.ctf_binary_path }}" --version');
+		expect(workflow).toContain('bun scripts/ci-ctf-dashboard-smoke.ts --binary "${{ matrix.ctf_binary_path }}"');
 		expect(workflow).toContain("name: gjc-ctf-binary-${{ matrix.target_id }}");
 		expect(workflow).toContain("pattern: gjc-ctf-binary-*");
 		expect(workflow).toContain("files: release-binaries/gjc-*");

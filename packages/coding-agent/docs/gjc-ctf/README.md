@@ -36,7 +36,55 @@ packages/coding-agent/dist/gjc-ctf --help
 packages/coding-agent/dist/gjc-ctf bootstrap --category essential --category reverse --json
 ```
 
-The first bootstrap command is a dry-run audit. `--apply` requires at least one explicit category and re-verifies every installed binary. Reviewed categories are `essential`, `crypto`, `forensics`, `network`, `pwn`, `reverse`, `runtime`, and `web`; `reverse` includes `objdump` and Z3 for bounded local constraint work. Bootstrap accepts only the source-bundled allowlist, exact argument vectors, version probes, and post-install verification; challenge-provided declarations are rejected. A package installation exposes the same `gjc-ctf` bin name.
+The first bootstrap command is a dry-run audit. `--apply` requires at least one explicit category and re-verifies every installed binary. Reviewed categories are `essential`, `crypto`, `forensics`, `network`, `pwn`, `reverse`, `runtime`, and `web`; `reverse` includes `objdump` and Z3 for bounded local constraint work. Bootstrap accepts only the source-bundled allowlist, exact argument vectors, version probes, and post-install verification; challenge-provided declarations are rejected.
+
+## Package installation and release assets
+
+The recommended unscoped package exposes the same command:
+
+```sh
+npm install --global gajae-code
+gjc-ctf --help
+```
+
+The scoped package also exposes it:
+
+```sh
+npm install --global @gajae-code/coding-agent
+gjc-ctf --help
+```
+
+Set `VERSION` to a published release version before downloading a standalone release asset. Select the exact asset for the target architecture.
+
+Linux:
+
+```sh
+VERSION='RELEASE_VERSION'
+curl --fail --location --output gjc-ctf "https://github.com/Yeachan-Heo/gajae-code/releases/download/v${VERSION}/gjc-ctf-linux-x64"
+chmod +x gjc-ctf
+./gjc-ctf --help
+```
+
+For Linux ARM64, replace `gjc-ctf-linux-x64` with `gjc-ctf-linux-arm64`.
+
+macOS:
+
+```sh
+VERSION='RELEASE_VERSION'
+curl --fail --location --output gjc-ctf "https://github.com/Yeachan-Heo/gajae-code/releases/download/v${VERSION}/gjc-ctf-darwin-arm64"
+chmod +x gjc-ctf
+./gjc-ctf --help
+```
+
+For Intel macOS, replace `gjc-ctf-darwin-arm64` with `gjc-ctf-darwin-x64`.
+
+Windows PowerShell:
+
+```powershell
+$Version = "RELEASE_VERSION"
+Invoke-WebRequest -Uri "https://github.com/Yeachan-Heo/gajae-code/releases/download/v$Version/gjc-ctf-windows-x64.exe" -OutFile "gjc-ctf-windows-x64.exe"
+.\gjc-ctf-windows-x64.exe --help
+```
 
 ## Workspace and campaign execution
 

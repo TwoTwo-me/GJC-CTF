@@ -1,12 +1,35 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
 import { describe, expect, test } from "bun:test";
 import {
 	BUILTIN_CTF_TOOL_MANIFEST,
 	bootstrapCtfTools,
+	detectCtfPackageManager,
 	runExactArgv,
 	validateCtfToolBootstrapManifest,
 } from "../../src/ctf/bootstrap";
 
 describe("CTF safe tool bootstrap", () => {
+	test("discovers winget.exe through PATHEXT without accepting Windows extensions on POSIX", async () => {
+		const fixtureDirectory = await mkdtemp(path.join(tmpdir(), "ctf-bootstrap-"));
+		try {
+			await writeFile(path.join(fixtureDirectory, "winget.exe"), "");
+			await expect(detectCtfPackageManager("win32", { PATH: fixtureDirectory, PATHEXT: ".EXE" })).resolves.toBe(
+				"winget",
+			);
+			await expect(
+				detectCtfPackageManager("win32", { PATH: fixtureDirectory, PATHEXT: ".CMD" }),
+			).resolves.toBeUndefined();
+
+			await writeFile(path.join(fixtureDirectory, "apt-get.exe"), "");
+			await expect(
+				detectCtfPackageManager("linux", { PATH: fixtureDirectory, PATHEXT: ".EXE" }),
+			).resolves.toBeUndefined();
+		} finally {
+			await rm(fixtureDirectory, { force: true, recursive: true });
+		}
+	});
 	test("dry-run reports missing tools without executing an install", async () => {
 		const calls: string[][] = [];
 		const result = await bootstrapCtfTools({
@@ -88,6 +111,8 @@ describe("CTF safe tool bootstrap", () => {
 				"--exact",
 				"--id",
 				"Python.Python.3.12",
+				"--source",
+				"winget",
 				"--accept-source-agreements",
 				"--accept-package-agreements",
 				"--disable-interactivity",
@@ -98,6 +123,8 @@ describe("CTF safe tool bootstrap", () => {
 				"--exact",
 				"--id",
 				"Git.Git",
+				"--source",
+				"winget",
 				"--accept-source-agreements",
 				"--accept-package-agreements",
 				"--disable-interactivity",

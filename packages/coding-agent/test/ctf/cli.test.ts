@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { parseBootstrapCommandArgs, parseCtfArgv, renderCtfHelp } from "../../src/ctf/cli";
+import {
+	CTF_DASHBOARD_EMBEDDED_ARCHIVE,
+	parseBootstrapCommandArgs,
+	parseCtfArgv,
+	renderCtfHelp,
+} from "../../src/ctf/cli";
+import { createCtfDashboardAssetSource } from "../../src/ctf/dashboard/server";
 
 describe("gjc-ctf solve CLI surface", () => {
 	test("preserves multiple challenge ids and scheduler flags", () => {
@@ -21,9 +27,24 @@ describe("gjc-ctf solve CLI surface", () => {
 	});
 });
 
+describe("gjc-ctf embedded dashboard surface", () => {
+	test("serves the canonical embedded assets without a writable package directory", async () => {
+		const source = createCtfDashboardAssetSource(CTF_DASHBOARD_EMBEDDED_ARCHIVE);
+		if (source === undefined) throw new Error("embedded dashboard archive did not create an asset source");
+		for (const path of ["/", "/index.js", "/styles.css"]) {
+			const response = await source(path);
+			expect(response?.status).toBe(200);
+			expect((await response?.text())?.length).toBeGreaterThan(0);
+		}
+		expect(await source("/unexpected.js")).toBeUndefined();
+	});
+});
+
 describe("gjc-ctf bootstrap CLI surface", () => {
 	test("parses only the closed reviewed argument grammar", () => {
-		expect(parseBootstrapCommandArgs(["--category", "essential", "--category", "reverse", "--apply", "--json"])).toEqual({
+		expect(
+			parseBootstrapCommandArgs(["--category", "essential", "--category", "reverse", "--apply", "--json"]),
+		).toEqual({
 			categories: ["essential", "reverse"],
 			mode: "apply",
 			json: true,

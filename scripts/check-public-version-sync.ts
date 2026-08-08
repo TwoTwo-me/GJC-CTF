@@ -89,6 +89,13 @@ const STABLE_BINARY_ASSETS = [
 	"gjc-darwin-x64",
 	"gjc-windows-x64.exe",
 ] as const;
+const STABLE_CTF_BINARY_ASSETS = [
+	"gjc-ctf-linux-x64",
+	"gjc-ctf-linux-arm64",
+	"gjc-ctf-darwin-arm64",
+	"gjc-ctf-darwin-x64",
+	"gjc-ctf-windows-x64.exe",
+] as const;
 const STABLE_TAG_RE = /^v(\d+\.\d+\.\d+)$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const SHA1_RE = /^[a-f0-9]{40}$/;
@@ -356,7 +363,7 @@ function releaseCompletenessViolation(release: GitHubRelease): SyncViolation | u
 	if (release.published_at === null || normalizePublishedAt(release.published_at) === undefined) {
 		return { path: SOURCE_LATEST_RELEASE_API, message: `Published release ${release.tag_name} has no valid published_at timestamp.` };
 	}
-	for (const name of [...STABLE_BINARY_ASSETS, EXPECTED_EVIDENCE_ASSET, FINAL_EVIDENCE_ASSET]) {
+	for (const name of [...STABLE_BINARY_ASSETS, ...STABLE_CTF_BINARY_ASSETS, EXPECTED_EVIDENCE_ASSET, FINAL_EVIDENCE_ASSET]) {
 		if (releaseAsset(release, name) === undefined) {
 			return { path: SOURCE_LATEST_RELEASE_API, message: `Published release ${release.tag_name} is incomplete: missing ${name}.` };
 		}

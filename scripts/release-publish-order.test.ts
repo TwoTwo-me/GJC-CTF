@@ -84,11 +84,21 @@ describe("unscoped gajae-code package publication", () => {
 		expect(Number(aliasManifest.version.split(".")[2])).toBeGreaterThanOrEqual(
 			Number(codingAgentManifest.version.split(".")[2]),
 		);
-		expect(aliasManifest.bin).toEqual({ gjc: "bin/gjc.js" });
+		expect(aliasManifest.bin).toEqual({ gjc: "bin/gjc.js", "gjc-ctf": "bin/gjc-ctf.js" });
 		expect(aliasManifest.dependencies?.["@gajae-code/coding-agent"]).toBe("catalog:");
 		const wrapper = await Bun.file(path.join(repoRoot, "packages/gajae-code/bin/gjc.js")).text();
 		expect(wrapper).toContain('import { runCli } from "@gajae-code/coding-agent/cli";');
 		expect(wrapper).toContain("await runCli(process.argv.slice(2));");
+		const ctfWrapper = await Bun.file(path.join(repoRoot, "packages/gajae-code/bin/gjc-ctf.js")).text();
+		expect(ctfWrapper).toContain('import.meta.resolve("@gajae-code/coding-agent/cli")');
+		expect(ctfWrapper).toContain('"../bin/gjc-ctf.js"');
+	});
+	test("scoped package publishes only the tracked canonical CTF archive and CLI entrypoint", async () => {
+		const manifest = await readManifest("packages/coding-agent");
+		expect(manifest.files).toContain("src/ctf/dashboard/embedded-client.generated.txt");
+		expect(manifest.files).toContain("bin/gjc-ctf.js");
+		expect(manifest.files).not.toContain("src/ctf/dashboard/dist");
+		expect(manifest.files).not.toContain("dist/gjc-ctf");
 	});
 
 	test("release dependency normalization collapses repeated file prefixes", () => {

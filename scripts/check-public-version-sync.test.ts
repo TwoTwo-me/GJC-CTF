@@ -73,6 +73,11 @@ function stableRelease(assets?: Array<{ name: string; browser_download_url: stri
 			{ name: "gjc-darwin-arm64", browser_download_url: "https://assets.example/gjc-darwin-arm64" },
 			{ name: "gjc-darwin-x64", browser_download_url: "https://assets.example/gjc-darwin-x64" },
 			{ name: "gjc-windows-x64.exe", browser_download_url: "https://assets.example/gjc-windows-x64.exe" },
+			{ name: "gjc-ctf-linux-x64", browser_download_url: "https://assets.example/gjc-ctf-linux-x64" },
+			{ name: "gjc-ctf-linux-arm64", browser_download_url: "https://assets.example/gjc-ctf-linux-arm64" },
+			{ name: "gjc-ctf-darwin-arm64", browser_download_url: "https://assets.example/gjc-ctf-darwin-arm64" },
+			{ name: "gjc-ctf-darwin-x64", browser_download_url: "https://assets.example/gjc-ctf-darwin-x64" },
+			{ name: "gjc-ctf-windows-x64.exe", browser_download_url: "https://assets.example/gjc-ctf-windows-x64.exe" },
 			{ name: "gajae-release-packages-expected-v1.json", browser_download_url: EXPECTED_ASSET_URL },
 			{ name: "gajae-release-packages-v1.json", browser_download_url: FINAL_ASSET_URL },
 		],
@@ -397,21 +402,26 @@ describe("public docs/site/version sync guard", () => {
 		]);
 	});
 
-	test("live check rejects a stable release without final package evidence before reading deployed state", async () => {
+	test("live check rejects a stable release missing a required standalone CTF asset before reading deployed state", async () => {
 		const incompleteAssets = [
 			{ name: "gjc-linux-x64", browser_download_url: "https://assets.example/gjc-linux-x64" },
 			{ name: "gjc-linux-arm64", browser_download_url: "https://assets.example/gjc-linux-arm64" },
 			{ name: "gjc-darwin-arm64", browser_download_url: "https://assets.example/gjc-darwin-arm64" },
 			{ name: "gjc-darwin-x64", browser_download_url: "https://assets.example/gjc-darwin-x64" },
 			{ name: "gjc-windows-x64.exe", browser_download_url: "https://assets.example/gjc-windows-x64.exe" },
+			{ name: "gjc-ctf-linux-x64", browser_download_url: "https://assets.example/gjc-ctf-linux-x64" },
+			{ name: "gjc-ctf-linux-arm64", browser_download_url: "https://assets.example/gjc-ctf-linux-arm64" },
+			{ name: "gjc-ctf-darwin-arm64", browser_download_url: "https://assets.example/gjc-ctf-darwin-arm64" },
+			{ name: "gjc-ctf-darwin-x64", browser_download_url: "https://assets.example/gjc-ctf-darwin-x64" },
 			{ name: "gajae-release-packages-expected-v1.json", browser_download_url: EXPECTED_ASSET_URL },
+			{ name: "gajae-release-packages-v1.json", browser_download_url: FINAL_ASSET_URL },
 		];
 		const responses = liveResponses(stableRelease(incompleteAssets), releaseState());
 
 		await expect(checkLivePublicVersionSync("unused", mockFetch(responses), 50)).resolves.toEqual([
 			{
 				path: LATEST_RELEASE_API,
-				message: "Published release v1.2.3 is incomplete: missing gajae-release-packages-v1.json.",
+				message: "Published release v1.2.3 is incomplete: missing gjc-ctf-windows-x64.exe.",
 			},
 		]);
 	});

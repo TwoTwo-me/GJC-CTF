@@ -296,14 +296,31 @@ export async function detectCtfPackageManager(
 ): Promise<BootstrapPackageManager | undefined> {
 	const candidates: readonly BootstrapPackageManager[] =
 		platform === "darwin" ? ["brew"] : platform === "win32" ? ["winget"] : ["apt", "dnf", "pacman"];
+	const pathEntries = (env.PATH ?? "").split(platform === "win32" ? ";" : path.delimiter);
 	for (const manager of candidates) {
-		const paths = (env.PATH ?? "").split(path.delimiter);
 		const executable = manager === "apt" ? "apt-get" : manager;
-		for (const directory of paths) {
-			try {
-				if ((await Bun.file(path.join(directory, executable)).stat()).isFile()) return manager;
-			} catch {
-				/* unavailable */
+		const executableNames =
+			platform === "win32"
+				? [
+						...new Set(
+							(env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+								.split(";")
+								.map(extension => extension.trim())
+								.filter(
+									extension =>
+										extension.startsWith(".") && !extension.includes("/") && !extension.includes("\\"),
+								)
+								.map(extension => `${executable}${extension.toLowerCase()}`),
+						),
+					]
+				: [executable];
+		for (const directory of pathEntries) {
+			for (const executableName of executableNames) {
+				try {
+					if ((await Bun.file(path.join(directory, executableName)).stat()).isFile()) return manager;
+				} catch {
+					/* unavailable */
+				}
 			}
 		}
 	}
@@ -324,6 +341,8 @@ function packageInstallArgvs(
 					"--exact",
 					"--id",
 					packageName,
+					"--source",
+					"winget",
 					"--accept-source-agreements",
 					"--accept-package-agreements",
 					"--disable-interactivity",
