@@ -14,12 +14,18 @@ import type {
 	CtfTerminationRequest,
 } from "../runtime/scheduler";
 import {
+	type LocalEvaluationAdapter,
+	type LocalEvaluationAdapterProvider,
+	matchingLocalEvaluationProviders,
+	openLocalEvaluationAdapter,
+} from "./local-evaluation-adapter";
+import {
 	fixtureSolverRouteFor,
 	REVIEWED_SOLVER_ANALYZER_IDS,
-	solverRouteFor,
-	validateSolverRoute,
 	type SolverAttemptLimits,
 	type SolverRoute,
+	solverRouteFor,
+	validateSolverRoute,
 } from "./router";
 
 const FORBIDDEN_BASENAMES = new Set(["challenge.yaml", "solve.py"]);
@@ -47,6 +53,7 @@ export type LocalSolverSessionInput = Readonly<{
 	thinkingLevel: SolverRoute["thinkingLevel"];
 	attemptLimits: SolverAttemptLimits;
 	visibleFiles: readonly LocalSolverVisibleFile[];
+	evaluationAdapter?: LocalEvaluationAdapter;
 	runCapability: LocalSolverRunCapability;
 	network: "off";
 	credentials: "none";
@@ -78,6 +85,7 @@ export type LocalCtfSolverBackendOptions = Readonly<{
 	artifactRoot: string;
 	allowedTools?: readonly string[];
 	analyzers?: readonly LocalSolverAnalyzer[];
+	adapterProviders?: readonly LocalEvaluationAdapterProvider[];
 	createSession: (request: CtfSolverRequest) => Promise<LocalSolverSession>;
 }>;
 type MaterializedWithVisibleDigests = Readonly<{
@@ -303,6 +311,7 @@ export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOption
 	if (!contained(root, artifactRoot)) throw new Error("artifact root must be contained by the workspace root");
 	const allowedTools = Object.freeze([...(options.allowedTools ?? [])]);
 	const analyzers = Object.freeze([...(options.analyzers ?? [])]);
+	const adapterProviders = Object.freeze([...(options.adapterProviders ?? [])]);
 	const analyzerById = new Map<string, LocalSolverAnalyzer>();
 	const reviewedAnalyzerIds = REVIEWED_SOLVER_ANALYZER_IDS;
 	for (const analyzer of analyzers) {
@@ -476,9 +485,31 @@ export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOption
 					if (controller.signal.aborted)
 						return { status: "cancelled", reason: "run cancelled or budget exhausted" };
 					if (result === undefined) {
-						run.session = await options.createSession(request);
-						run.sessionReady.resolve(run.session);
-						result = await run.session.solve(input);
+						const matchingProviders = matchingLocalEvaluationProviders(adapterProviders, route);
+						if (route.adapterKind !== "offline-checker" && matchingProviders.length !== 1)
+							return {
+								status: "blocked",
+								reason:
+									matchingProviders.length === 0
+										? "reviewed local evaluation adapter provider is not registered"
+										: "reviewed local evaluation adapter provider is registered more than once",
+							};
+						let evaluationAdapter: LocalEvaluationAdapter | undefined;
+						try {
+							if (matchingProviders.length === 1)
+								evaluationAdapter = await openLocalEvaluationAdapter(
+									matchingProviders[0]!,
+									route,
+									controller.signal,
+								);
+							run.session = await options.createSession(request);
+							run.sessionReady.resolve(run.session);
+							result = await run.session.solve(
+								evaluationAdapter === undefined ? input : { ...input, evaluationAdapter },
+							);
+						} finally {
+							await evaluationAdapter?.close();
+						}
 					}
 					if (controller.signal.aborted)
 						return { status: "cancelled", reason: "run cancelled or budget exhausted" };
