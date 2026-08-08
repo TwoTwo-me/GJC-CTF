@@ -1,4 +1,8 @@
-import type { LocalSolverAnalyzer, LocalSolverSessionInput } from "../local-backend";
+import {
+	createLocalSolverAnalyzerLifecycle,
+	type LocalSolverAnalyzer,
+	type LocalSolverSessionInput,
+} from "../local-backend";
 
 const CHALLENGE_ID = "lactf-2026-crypto-not-so-lazy-trigrams";
 const MAX_SOURCE_BYTES = 16 * 1024;
@@ -326,12 +330,14 @@ export async function analyzeNotSoLazyTrigrams(
 export function createNotSoLazyTrigramsAnalyzer(options: NotSoLazyTrigramsOptions = {}): LocalSolverAnalyzer {
 	return {
 		id: "not-so-lazy-trigrams",
-		async analyze(input) {
-			const analysis = await analyzeNotSoLazyTrigrams(input, options);
-			if (analysis === "not-applicable") return { status: "not-applicable" };
-			if (analysis === "cancelled") return { status: "cancelled", reason: "run cancelled" };
-			if (!analysis.ok) return { status: "refused", reason: analysis.reason };
-			return { status: "candidate", result: { candidate: analysis.candidate } };
+		analyze(input) {
+			return createLocalSolverAnalyzerLifecycle(input, async ownedInput => {
+				const analysis = await analyzeNotSoLazyTrigrams(ownedInput, options);
+				if (analysis === "not-applicable") return { status: "not-applicable" };
+				if (analysis === "cancelled") return { status: "cancelled", reason: "run cancelled" };
+				if (!analysis.ok) return { status: "refused", reason: analysis.reason };
+				return { status: "candidate", result: { candidate: analysis.candidate } };
+			});
 		},
 	};
 }

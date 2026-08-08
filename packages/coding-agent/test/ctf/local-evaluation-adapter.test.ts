@@ -3,7 +3,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { sha256Hex } from "../../src/ctf/contracts/digest";
-import { createLocalCtfSolverBackend } from "../../src/ctf/solver/local-backend";
+import {
+	createLocalCtfSolverBackend,
+	type LocalSolverSession,
+	type LocalSolverSessionLifecycle,
+} from "../../src/ctf/solver/local-backend";
 import {
 	type LocalEvaluationAcquisition,
 	type LocalEvaluationAdapterProvider,
@@ -29,6 +33,13 @@ function isAcquisition(value: unknown): value is LocalEvaluationAcquisition {
 		"terminate" in value &&
 		typeof value.terminate === "function"
 	);
+}
+function settledSessionLifecycle(session: LocalSolverSession): LocalSolverSessionLifecycle {
+	return {
+		session: Promise.resolve(session),
+		terminate: async () => undefined,
+		quiesced: Promise.resolve(),
+	};
 }
 
 function processProvider(
@@ -97,7 +108,7 @@ describe("local evaluation adapters", () => {
 					makeDescriptor({ id: processRoute.challengeId, visibleArtifactAllowlist: ["answer.txt"] }),
 				],
 			]),
-			createSession: async () => ({ solve: async () => ({}) }),
+			createSession: () => settledSessionLifecycle({ solve: async () => ({}) }),
 		};
 		for (const providers of [
 			[],
@@ -113,12 +124,13 @@ describe("local evaluation adapters", () => {
 		const backend = createLocalCtfSolverBackend({
 			...base,
 			adapterProviders: [processProvider()],
-			createSession: async () => ({
-				solve: async input => {
-					sessionInput = input.evaluationAdapter;
-					return {};
-				},
-			}),
+			createSession: () =>
+				settledSessionLifecycle({
+					solve: async input => {
+						sessionInput = input.evaluationAdapter;
+						return {};
+					},
+				}),
 		});
 		await expect(backend.solve(request(processRoute.challengeId, root))).resolves.toMatchObject({
 			status: "failed",
@@ -165,9 +177,14 @@ describe("local evaluation adapters", () => {
 					},
 				}),
 			],
-			createSession: async () => {
+			createSession: () => {
 				sessionStarted.resolve();
-				return await never;
+				const quiesced = Promise.withResolvers<void>();
+				return {
+					session: never,
+					terminate: async () => quiesced.resolve(),
+					quiesced: quiesced.promise,
+				};
 			},
 		});
 		void backend.solve(request(processRoute.challengeId, root));
@@ -182,7 +199,7 @@ describe("local evaluation adapters", () => {
 				fencingToken: 1,
 				reason: "cancelled",
 			}),
-		).rejects.toThrow(/session readiness/);
+		).resolves.toBeUndefined();
 		expect(serviceCloses).toBe(1);
 		expect(acquisitionTerminations).toBe(1);
 	});

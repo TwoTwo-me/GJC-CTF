@@ -27,6 +27,7 @@ function campaignState(statuses: readonly CtfCampaignState["challenges"][number]
 		stopAt: CTF_CAMPAIGN_HARD_STOP,
 		challenges: challengeIds.map((challengeId, index) => ({
 			challengeId,
+			inputDigest: canonicalDigest({ challengeId, fixture: "iterative-controller" }),
 			status: statuses[index] ?? "pending",
 			attempts: [],
 		})),

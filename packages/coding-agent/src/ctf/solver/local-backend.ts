@@ -35,6 +35,36 @@ const MAX_VISIBLE_BYTES = 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 64 * 1024;
 const MAX_ARTIFACTS = 8;
 const TERMINATION_TIMEOUT_MS = 250;
+const LOCAL_SOLVER_PRODUCER_DIGEST = canonicalDigest({ backendId: "local-gjc-agent", version: 1 });
+async function waitBounded(operation: Promise<void>, timeoutMs: number, label: string): Promise<void> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		await Promise.race([
+			operation,
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
+			}),
+		]);
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
+}
+async function awaitOrAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | undefined> {
+	if (signal.aborted) return undefined;
+	return await new Promise<T | undefined>((resolve, reject) => {
+		const abort = () => finish(undefined);
+		const finish = (value?: T, error?: unknown): void => {
+			signal.removeEventListener("abort", abort);
+			if (error !== undefined) reject(error);
+			else resolve(value);
+		};
+		signal.addEventListener("abort", abort, { once: true });
+		promise.then(
+			value => finish(value),
+			error => finish(undefined, error),
+		);
+	});
+}
 
 export type LocalSolverVisibleFile = Readonly<{ path: string; content: Uint8Array }>;
 export type LocalSolverArtifact = Readonly<{ path: string; content: Uint8Array }>;
@@ -69,17 +99,61 @@ export type LocalSolverSessionResult = Readonly<{
 /** The production seam is an AgentSession/SDK adapter, never a child-process exit code. */
 export type LocalSolverSession = Readonly<{
 	solve(input: LocalSolverSessionInput): Promise<LocalSolverSessionResult>;
-	/** Resolves once session-owned work for the run cannot write again. */
-	terminate?(request: CtfRunTerminationRequest): Promise<void>;
+}>;
+/** Acquired synchronously so cancellation owns creation before a session result can arrive. */
+export type LocalSolverSessionLifecycle = Readonly<{
+	session: Promise<LocalSolverSession>;
+	terminate(request: CtfRunTerminationRequest): Promise<void>;
+	/** Resolves only after acquisition and session-owned work can no longer write. */
+	quiesced: Promise<void>;
 }>;
 export type LocalSolverAnalyzerResult =
 	| Readonly<{ status: "not-applicable" }>
 	| Readonly<{ status: "refused"; reason: string }>
 	| Readonly<{ status: "candidate"; result: LocalSolverSessionResult }>
 	| Readonly<{ status: "cancelled"; reason?: string }>;
+export type LocalSolverAnalyzerLifecycle = Readonly<{
+	result: Promise<LocalSolverAnalyzerResult>;
+	terminate(request: CtfRunTerminationRequest): Promise<void>;
+	/** Resolves only after analyzer-owned work can no longer write. */
+	quiesced: Promise<void>;
+}>;
+export function createLocalSolverAnalyzerLifecycle(
+	input: LocalSolverSessionInput,
+	analyze: (ownedInput: LocalSolverSessionInput) => Promise<LocalSolverAnalyzerResult>,
+): LocalSolverAnalyzerLifecycle {
+	const controller = new AbortController();
+	const abort = () => controller.abort(input.signal.reason);
+	if (input.signal.aborted) abort();
+	else input.signal.addEventListener("abort", abort, { once: true });
+	const result = Promise.resolve().then(() => analyze({ ...input, signal: controller.signal }));
+	const quiesced = result
+		.then(
+			() => undefined,
+			() => undefined,
+		)
+		.finally(() => input.signal.removeEventListener("abort", abort));
+	return {
+		result,
+		terminate: async request => controller.abort(request.reason),
+		quiesced,
+	};
+}
+function isLocalSolverAnalyzerLifecycle(value: unknown): value is LocalSolverAnalyzerLifecycle {
+	return (
+		value !== null &&
+		typeof value === "object" &&
+		"result" in value &&
+		value.result instanceof Promise &&
+		"terminate" in value &&
+		typeof value.terminate === "function" &&
+		"quiesced" in value &&
+		value.quiesced instanceof Promise
+	);
+}
 export type LocalSolverAnalyzer = Readonly<{
 	id: string;
-	analyze(input: LocalSolverSessionInput): Promise<LocalSolverAnalyzerResult>;
+	analyze(input: LocalSolverSessionInput): LocalSolverAnalyzerLifecycle;
 }>;
 export type LocalCtfSolverBackendOptions = Readonly<{
 	root: string;
@@ -88,8 +162,14 @@ export type LocalCtfSolverBackendOptions = Readonly<{
 	allowedTools?: readonly string[];
 	analyzers?: readonly LocalSolverAnalyzer[];
 	adapterProviders?: readonly LocalEvaluationAdapterProvider[];
-	createSession: (request: CtfSolverRequest) => Promise<LocalSolverSession>;
+	createSession: (request: CtfSolverRequest) => LocalSolverSessionLifecycle;
 }>;
+export type LocalCtfSolverFixtureBackendOptions = Omit<LocalCtfSolverBackendOptions, "createSession"> &
+	Readonly<{
+		createSession: (
+			request: CtfSolverRequest,
+		) => Promise<LocalSolverSession & Readonly<{ terminate?(request: CtfRunTerminationRequest): Promise<void> }>>;
+	}>;
 type MaterializedWithVisibleDigests = Readonly<{
 	root: string;
 	provenanceDigest: string;
@@ -308,6 +388,46 @@ function createRunCapability(): {
 }
 
 export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOptions): CtfSolverBackend {
+	return createLocalCtfSolverBackendForRoutes(options, solverRouteFor);
+}
+
+/** Fixture-only constructor. Production code must use createLocalCtfSolverBackend. */
+export function createLocalCtfSolverFixtureBackend(options: LocalCtfSolverFixtureBackendOptions): CtfSolverBackend {
+	return createLocalCtfSolverBackendForRoutes(
+		{
+			...options,
+			createSession: request => {
+				const session = options.createSession(request);
+				const quiescence = Promise.withResolvers<void>();
+				const wrappedSession = session.then(active => ({
+					...active,
+					solve: async (input: LocalSolverSessionInput) => {
+						try {
+							return await active.solve(input);
+						} finally {
+							quiescence.resolve();
+						}
+					},
+				}));
+				return {
+					session: wrappedSession,
+					terminate: async termination => {
+						const active = await wrappedSession;
+						await active.terminate?.(termination);
+						quiescence.resolve();
+					},
+					quiesced: quiescence.promise,
+				};
+			},
+		},
+		fixtureSolverRouteFor,
+	);
+}
+
+function createLocalCtfSolverBackendForRoutes(
+	options: LocalCtfSolverBackendOptions,
+	routeFor: (challengeId: string) => SolverRoute,
+): CtfSolverBackend {
 	const root = path.resolve(options.root);
 	const artifactRoot = path.resolve(options.artifactRoot);
 	if (!contained(root, artifactRoot)) throw new Error("artifact root must be contained by the workspace root");
@@ -331,11 +451,11 @@ export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOption
 		artifactPath: string;
 		controller: AbortController;
 		completion: Promise<void>;
-		sessionReady: PromiseWithResolvers<LocalSolverSession | undefined>;
-		session?: LocalSolverSession;
+		sessionLifecycle?: LocalSolverSessionLifecycle;
 		evaluationAdapter?: LocalEvaluationAdapter;
 		acquisition?: LocalEvaluationAdapterLifecycle;
 		termination?: Promise<void>;
+		quiescenceTimeoutMs: number;
 	};
 	const runs = new Map<string, ActiveRun>();
 	return {
@@ -356,8 +476,20 @@ export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOption
 				run.controller.abort(request.reason);
 				run.termination = (async () => {
 					const acquisition = await Promise.allSettled([
-						Promise.resolve().then(() => run.acquisition?.close()),
-						Promise.resolve().then(() => run.evaluationAdapter?.close()),
+						waitBounded(
+							Promise.resolve().then(async () => {
+								await run.acquisition?.close();
+							}),
+							run.quiescenceTimeoutMs,
+							"termination timed out closing adapter acquisition",
+						),
+						waitBounded(
+							Promise.resolve().then(async () => {
+								await run.evaluationAdapter?.close();
+							}),
+							run.quiescenceTimeoutMs,
+							"termination timed out closing evaluation adapter",
+						),
 					]);
 					const acquisitionFailure = acquisition.find(
 						(acknowledgment): acknowledgment is PromiseRejectedResult => acknowledgment.status === "rejected",
@@ -366,43 +498,24 @@ export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOption
 						void run.completion.catch(() => undefined);
 						throw acquisitionFailure.reason;
 					}
-					const readiness = await Promise.race([
-						run.sessionReady.promise.then(session => ({ kind: "session" as const, session })),
-						run.completion.then(() => ({ kind: "complete" as const })),
-						new Promise<Readonly<{ kind: "timeout" }>>(resolve =>
-							setTimeout(() => resolve({ kind: "timeout" }), TERMINATION_TIMEOUT_MS),
-						),
-					]);
-					if (readiness.kind === "timeout") {
-						void run.sessionReady.promise.then(late => late?.terminate?.(request)).catch(() => undefined);
-						throw new Error("termination timed out waiting for session readiness");
-					}
-					const session = readiness.kind === "session" ? readiness.session : undefined;
-					let sessionAcknowledged = false;
-					const terminateSession = session?.terminate;
-					if (terminateSession !== undefined) {
-						const sessionTermination = await Promise.race([
-							Promise.resolve()
-								.then(() => terminateSession(request))
-								.then(
-									() => ({ kind: "acknowledged" as const }),
-									error => ({ kind: "rejected" as const, error }),
-								),
-							new Promise<Readonly<{ kind: "timeout" }>>(resolve =>
-								setTimeout(() => resolve({ kind: "timeout" }), TERMINATION_TIMEOUT_MS),
-							),
-						]);
-						if (sessionTermination.kind === "timeout")
-							throw new Error("termination timed out waiting for session acknowledgment");
-						if (sessionTermination.kind === "rejected") throw sessionTermination.error;
-						sessionAcknowledged = true;
-					}
-					if (!sessionAcknowledged) {
-						const completion = await Promise.race([
-							run.completion.then(() => "complete" as const),
-							new Promise<"timeout">(resolve => setTimeout(() => resolve("timeout"), TERMINATION_TIMEOUT_MS)),
-						]);
-						if (completion === "timeout") throw new Error("termination timed out waiting for run completion");
+					const lifecycle = run.sessionLifecycle;
+					if (lifecycle !== undefined) {
+						await waitBounded(
+							Promise.resolve().then(() => lifecycle.terminate(request)),
+							run.quiescenceTimeoutMs,
+							"termination timed out waiting for session lifecycle termination",
+						);
+						await waitBounded(
+							lifecycle.quiesced,
+							run.quiescenceTimeoutMs,
+							"termination timed out waiting for session lifecycle quiescence",
+						);
+					} else {
+						await waitBounded(
+							run.completion,
+							run.quiescenceTimeoutMs,
+							"termination timed out waiting for run completion",
+						);
 					}
 					const residual = await fs.lstat(run.artifactPath).catch(error => {
 						if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
@@ -426,7 +539,6 @@ export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOption
 			if (request.signal.aborted) abort();
 			else request.signal.addEventListener("abort", abort, { once: true });
 			const completion = Promise.withResolvers<void>();
-			const sessionReady = Promise.withResolvers<LocalSolverSession | undefined>();
 			const run: ActiveRun = {
 				runId: request.runId,
 				challengeId: request.challengeId,
@@ -436,7 +548,7 @@ export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOption
 				artifactPath,
 				controller,
 				completion: completion.promise,
-				sessionReady,
+				quiescenceTimeoutMs: TERMINATION_TIMEOUT_MS,
 			};
 			runs.set(request.runId, run);
 			try {
@@ -445,12 +557,11 @@ export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOption
 					return { status: "blocked", reason: "challenge is not locally admissible" };
 				let route: SolverRoute;
 				try {
-					route = solverRouteFor(request.challengeId);
+					route = routeFor(request.challengeId);
 				} catch {
-					if (descriptor.trustLevel !== "fixture")
-						return { status: "blocked", reason: "challenge solver route is not reviewed" };
-					route = fixtureSolverRouteFor(request.challengeId);
+					return { status: "blocked", reason: "challenge solver route is not reviewed" };
 				}
+				run.quiescenceTimeoutMs = Math.min(TERMINATION_TIMEOUT_MS, route.attemptLimits.wallClockMs);
 				const materialized = request.materialized as MaterializedWithVisibleDigests | undefined;
 				if (
 					materialized === undefined ||
@@ -518,8 +629,67 @@ export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOption
 						selectedAnalyzers.push(analyzer);
 					}
 					let result: LocalSolverSessionResult | undefined;
+					const analyzerTerminationRequest = (): CtfRunTerminationRequest => ({
+						competitionId: request.authority.competitionId,
+						runId: request.runId,
+						challengeId: request.challengeId,
+						ownerId: request.runId,
+						fencingToken: request.authority.fencingToken,
+						reason: "cancelled",
+					});
 					for (const analyzer of selectedAnalyzers) {
-						const analysis = await analyzer.analyze(input);
+						const lifecycle: unknown = analyzer.analyze(input);
+						if (!isLocalSolverAnalyzerLifecycle(lifecycle)) {
+							if (
+								lifecycle !== null &&
+								typeof lifecycle === "object" &&
+								"then" in lifecycle &&
+								typeof lifecycle.then === "function"
+							)
+								void Promise.resolve(lifecycle).catch(() => undefined);
+							throw new Error(`analyzer ${analyzer.id} lifecycle is invalid`);
+						}
+						const terminateAndQuiesce = async (): Promise<void> => {
+							const termination = await Promise.allSettled([
+								waitBounded(
+									Promise.resolve().then(() => lifecycle.terminate(analyzerTerminationRequest())),
+									run.quiescenceTimeoutMs,
+									`analyzer ${analyzer.id} termination`,
+								),
+							]);
+							const quiescence = await Promise.allSettled([
+								waitBounded(lifecycle.quiesced, run.quiescenceTimeoutMs, `analyzer ${analyzer.id} quiescence`),
+							]);
+							const failure = [...termination, ...quiescence].find(
+								(result): result is PromiseRejectedResult => result.status === "rejected",
+							);
+							if (failure !== undefined) throw failure.reason;
+						};
+						let analysis: LocalSolverAnalyzerResult | undefined;
+						try {
+							analysis = await awaitOrAbort(lifecycle.result, controller.signal);
+						} catch (error) {
+							await terminateAndQuiesce();
+							throw error;
+						}
+						if (analysis === undefined || controller.signal.aborted) {
+							await terminateAndQuiesce();
+							return { status: "cancelled", reason: "run cancelled or budget exhausted" };
+						}
+						try {
+							await waitBounded(
+								lifecycle.quiesced,
+								run.quiescenceTimeoutMs,
+								`analyzer ${analyzer.id} quiescence`,
+							);
+						} catch (error) {
+							await terminateAndQuiesce();
+							throw error;
+						}
+						if (controller.signal.aborted) {
+							await terminateAndQuiesce();
+							return { status: "cancelled", reason: "run cancelled or budget exhausted" };
+						}
 						if (analysis.status === "not-applicable") continue;
 						if (analysis.status === "cancelled")
 							return { status: "cancelled", reason: analysis.reason ?? "analyzer cancelled" };
@@ -534,6 +704,8 @@ export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOption
 					if (controller.signal.aborted)
 						return { status: "cancelled", reason: "run cancelled or budget exhausted" };
 					if (result === undefined) {
+						if (route.adapterKind === "browser-session")
+							return { status: "blocked", reason: "browser-session routes are disabled" };
 						const matchingProviders = matchingLocalEvaluationProviders(adapterProviders, route);
 						if (route.adapterKind !== "offline-checker" && matchingProviders.length !== 1)
 							return {
@@ -565,18 +737,119 @@ export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOption
 									acquisition,
 								);
 								run.evaluationAdapter = evaluationAdapter;
+								if (controller.signal.aborted)
+									return { status: "cancelled", reason: "run cancelled or budget exhausted" };
 							}
-							run.session = await options.createSession(request);
-							run.sessionReady.resolve(run.session);
-							result = await run.session.solve(
-								evaluationAdapter === undefined ? input : { ...input, evaluationAdapter },
-							);
+							const lifecycle = options.createSession(request);
+							if (
+								lifecycle === null ||
+								typeof lifecycle !== "object" ||
+								typeof lifecycle.terminate !== "function" ||
+								lifecycle.session === undefined ||
+								typeof lifecycle.session.then !== "function" ||
+								lifecycle.quiesced === undefined ||
+								typeof lifecycle.quiesced.then !== "function"
+							)
+								throw new Error("local solver session lifecycle is invalid");
+							run.sessionLifecycle = lifecycle;
+							const terminateSession = async (label: string): Promise<void> => {
+								await waitBounded(
+									Promise.resolve().then(() =>
+										lifecycle.terminate({
+											competitionId: request.authority.competitionId,
+											runId: request.runId,
+											challengeId: request.challengeId,
+											ownerId: request.runId,
+											fencingToken: request.authority.fencingToken,
+											reason: "cancelled",
+										}),
+									),
+									run.quiescenceTimeoutMs,
+									`session lifecycle termination ${label}`,
+								);
+								await waitBounded(
+									lifecycle.quiesced,
+									run.quiescenceTimeoutMs,
+									`session lifecycle quiescence ${label}`,
+								);
+							};
+							const session = await awaitOrAbort(lifecycle.session, controller.signal);
+							if (session === undefined || controller.signal.aborted) {
+								await waitBounded(
+									Promise.resolve().then(() =>
+										lifecycle.terminate({
+											competitionId: request.authority.competitionId,
+											runId: request.runId,
+											challengeId: request.challengeId,
+											ownerId: request.runId,
+											fencingToken: request.authority.fencingToken,
+											reason: "cancelled",
+										}),
+									),
+									run.quiescenceTimeoutMs,
+									"session lifecycle termination after cancellation",
+								);
+								await waitBounded(
+									lifecycle.quiesced,
+									run.quiescenceTimeoutMs,
+									"session lifecycle quiescence after cancellation",
+								);
+								return { status: "cancelled", reason: "run cancelled or budget exhausted" };
+							}
+							let sessionResult: LocalSolverSessionResult;
+							try {
+								sessionResult = await session.solve(
+									evaluationAdapter === undefined ? input : { ...input, evaluationAdapter },
+								);
+							} catch (error) {
+								await terminateSession("after rejection");
+								throw error;
+							}
+							try {
+								await waitBounded(
+									lifecycle.quiesced,
+									run.quiescenceTimeoutMs,
+									"session lifecycle quiescence after completion",
+								);
+							} catch (error) {
+								await terminateSession("after completion quiescence failure");
+								throw error;
+							}
+							result = sessionResult;
 						} finally {
-							await evaluationAdapter?.close();
+							if (evaluationAdapter !== undefined)
+								await waitBounded(
+									evaluationAdapter.close(),
+									run.quiescenceTimeoutMs,
+									"evaluation adapter cleanup",
+								);
 						}
 					}
-					if (controller.signal.aborted)
+					if (controller.signal.aborted) {
+						const lifecycle = run.sessionLifecycle;
+						if (lifecycle !== undefined) {
+							await waitBounded(
+								Promise.resolve().then(() =>
+									lifecycle.terminate({
+										competitionId: request.authority.competitionId,
+										runId: request.runId,
+										challengeId: request.challengeId,
+										ownerId: request.runId,
+										fencingToken: request.authority.fencingToken,
+										reason: "cancelled",
+									}),
+								),
+								run.quiescenceTimeoutMs,
+								"session lifecycle termination after cancellation",
+							);
+							await waitBounded(
+								lifecycle.quiesced,
+								run.quiescenceTimeoutMs,
+								"session lifecycle quiescence after cancellation",
+							);
+						}
 						return { status: "cancelled", reason: "run cancelled or budget exhausted" };
+					}
 					if (result.candidate === undefined || result.candidate.trim() === "")
 						return { status: "failed", reason: "agent produced no candidate" };
 					const candidate = new TextEncoder().encode(result.candidate);
@@ -597,6 +870,8 @@ export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOption
 						status: "candidate",
 						artifacts: artifactEvidence.map(artifact => artifact.path),
 						artifactEvidence,
+						producerDigest: LOCAL_SOLVER_PRODUCER_DIGEST,
+						routeDigest: route.routeDigest,
 					};
 				} catch (error) {
 					return {
@@ -606,7 +881,6 @@ export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOption
 				}
 			} finally {
 				request.signal.removeEventListener("abort", abort);
-				run.sessionReady.resolve(undefined);
 				completion.resolve();
 				if (runs.get(request.runId) === run && run.termination === undefined) runs.delete(request.runId);
 			}

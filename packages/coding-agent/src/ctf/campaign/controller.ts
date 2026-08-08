@@ -1,8 +1,14 @@
 import { randomUUID } from "node:crypto";
 import * as path from "node:path";
-import { canonicalDigest, type Digest } from "../contracts/digest";
+import { canonicalDigest, type Digest, digestsEqual, isDigest } from "../contracts/digest";
 import { CtfError } from "../contracts/errors";
-import { type CorpusEntry, type MaterializedCorpus, validateCorpusEntry, validateMaterializedCorpus } from "../corpus";
+import {
+	type CorpusEntry,
+	corpusContentDigest,
+	type MaterializedCorpus,
+	validateCorpusEntry,
+	validateMaterializedCorpus,
+} from "../corpus";
 import {
 	type CtfArtifactEvidence,
 	type CtfBatchScheduleResult,
@@ -25,13 +31,22 @@ export type CampaignAttempt = Readonly<{
 	reason?: string;
 	artifacts: readonly string[];
 	artifactEvidence?: readonly CtfArtifactEvidence[];
+	producerDigest?: Digest;
+	routeDigest?: Digest;
+}>;
+
+export type CampaignMaterialized = Readonly<{
+	root: string;
+	provenanceDigest: Digest;
+	visibleFileDigests: Readonly<Record<string, Digest>>;
 }>;
 
 export type CampaignChallenge = Readonly<{
 	challengeId: string;
+	inputDigest: Digest;
 	status: "pending" | "candidate" | "unknown" | "failure";
 	attempts: readonly CampaignAttempt[];
-	materialized?: Readonly<{ root: string; provenanceDigest: string }>;
+	materialized?: CampaignMaterialized;
 }>;
 
 export type CtfCampaignState = Readonly<{
@@ -57,12 +72,19 @@ export type CtfCampaignMaterializer = ((
 	terminate?(request: CtfTerminationRequest): Promise<void>;
 };
 
+export type CampaignCandidateLineage = Readonly<{
+	producerDigest: Digest;
+	routeDigest: Digest;
+}>;
+
 export type CtfCampaignOptions = Readonly<{
 	campaignId: string;
 	competitionId: string;
 	challenges: readonly CorpusEntry[];
 	store: CtfStateStoreLike;
 	backend: CtfSolverBackend;
+	/** Required to resume a candidate: binds its immutable producing route and backend lineage. */
+	candidateLineageFor?: (input: Readonly<{ challengeId: string }>) => Promise<CampaignCandidateLineage>;
 	authorityFor: Parameters<typeof scheduleCtfRuns>[0]["authorityFor"];
 	terminateAuthority: NonNullable<Parameters<typeof scheduleCtfRuns>[0]["terminateAuthority"]>;
 	prepareRun?: Parameters<typeof scheduleCtfRuns>[0]["prepareRun"];
@@ -117,6 +139,77 @@ function validArtifactEvidence(value: unknown): value is CtfArtifactEvidence {
 		size >= 0
 	);
 }
+function validRelativePath(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		!path.isAbsolute(value) &&
+		!value.includes("\\") &&
+		path.posix.normalize(value) === value &&
+		value !== "." &&
+		!value.startsWith("../") &&
+		!value.includes("/../")
+	);
+}
+
+function validMaterialized(value: unknown): value is CampaignMaterialized {
+	if (!isRecord(value) || Object.keys(value).length !== 3) return false;
+	if (
+		typeof value.root !== "string" ||
+		value.root.length === 0 ||
+		!path.isAbsolute(value.root) ||
+		path.resolve(value.root) !== value.root ||
+		!isDigest(value.provenanceDigest) ||
+		!isRecord(value.visibleFileDigests)
+	)
+		return false;
+	const visibleFileDigests = value.visibleFileDigests;
+	const paths = Object.keys(visibleFileDigests);
+	return (
+		paths.length > 0 &&
+		paths.every(relativePath => validRelativePath(relativePath) && isDigest(visibleFileDigests[relativePath]))
+	);
+}
+
+function campaignInputDigest(entry: CorpusEntry, backendId: string): Digest {
+	return canonicalDigest({
+		backendId,
+		source: entry.source,
+		provenance: entry.provenance,
+		permissionEvidence: entry.permissionEvidence ?? null,
+		installCommands: entry.installCommands ?? [],
+	});
+}
+function materializedMatchesEntry(materialized: CampaignMaterialized, entry: CorpusEntry): boolean {
+	const expectedFiles = Object.fromEntries(entry.provenance.files.map(file => [file.relativePath, file.sha256]));
+	const actualPaths = Object.keys(materialized.visibleFileDigests);
+	return (
+		digestsEqual(materialized.provenanceDigest, corpusContentDigest(entry.provenance)) &&
+		actualPaths.length === Object.keys(expectedFiles).length &&
+		actualPaths.every(
+			relativePath =>
+				expectedFiles[relativePath] !== undefined &&
+				digestsEqual(materialized.visibleFileDigests[relativePath] ?? "", expectedFiles[relativePath]),
+		)
+	);
+}
+function validLineage(value: unknown): value is CampaignCandidateLineage {
+	return (
+		isRecord(value) &&
+		Object.keys(value).length === 2 &&
+		isDigest(value.producerDigest) &&
+		isDigest(value.routeDigest)
+	);
+}
+
+function attemptLineageMatches(attempt: CampaignAttempt, lineage: CampaignCandidateLineage): boolean {
+	return (
+		attempt.producerDigest !== undefined &&
+		attempt.routeDigest !== undefined &&
+		digestsEqual(attempt.producerDigest, lineage.producerDigest) &&
+		digestsEqual(attempt.routeDigest, lineage.routeDigest)
+	);
+}
 
 export function validateCampaignState(value: unknown): CtfCampaignState {
 	if (
@@ -138,8 +231,10 @@ export function validateCampaignState(value: unknown): CtfCampaignState {
 		if (
 			!isRecord(challenge) ||
 			typeof challenge.challengeId !== "string" ||
+			!isDigest(challenge.inputDigest) ||
 			!["pending", "candidate", "unknown", "failure"].includes(String(challenge.status)) ||
-			!Array.isArray(challenge.attempts)
+			!Array.isArray(challenge.attempts) ||
+			(challenge.materialized !== undefined && !validMaterialized(challenge.materialized))
 		)
 			throw new CtfError("integrity_error", "campaign challenge state is invalid");
 		for (const [index, attempt] of challenge.attempts.entries()) {
@@ -148,7 +243,12 @@ export function validateCampaignState(value: unknown): CtfCampaignState {
 				attempt.attempt !== index + 1 ||
 				typeof attempt.startedAt !== "string" ||
 				!["candidate", "unknown", "failure"].includes(String(attempt.status)) ||
-				!Array.isArray(attempt.artifacts)
+				!Array.isArray(attempt.artifacts) ||
+				(attempt.producerDigest === undefined) !== (attempt.routeDigest === undefined) ||
+				(attempt.producerDigest !== undefined &&
+					(!isDigest(attempt.producerDigest) || !isDigest(attempt.routeDigest))) ||
+				(attempt.status === "candidate" &&
+					(attempt.producerDigest === undefined || attempt.routeDigest === undefined))
 			)
 				throw new CtfError("integrity_error", "campaign attempt state is invalid");
 			const artifacts = attempt.artifacts;
@@ -210,7 +310,14 @@ function initialState(options: CtfCampaignOptions, now: Date): CtfCampaignState 
 		createdAt: now.toISOString(),
 		updatedAt: now.toISOString(),
 		stopAt: CTF_CAMPAIGN_HARD_STOP,
-		challenges: ids.sort().map(challengeId => ({ challengeId, status: "pending", attempts: [] })),
+		challenges: options.challenges
+			.map(entry => ({
+				challengeId: entry.source.challengeId,
+				inputDigest: campaignInputDigest(entry, options.backend.id),
+				status: "pending" as const,
+				attempts: [],
+			}))
+			.sort((left, right) => left.challengeId.localeCompare(right.challengeId)),
 	});
 }
 
@@ -342,16 +449,34 @@ async function runCtfCampaignWithDeadline(
 	) {
 		throw new CtfError("integrity_error", "campaign state identity or hard stop does not match");
 	}
-	const requestedChallengeIds = options.challenges.map(entry => entry.source.challengeId).sort();
-	const storedChallengeIds = state.challenges.map(challenge => challenge.challengeId).sort();
-	if (
-		requestedChallengeIds.length !== storedChallengeIds.length ||
-		requestedChallengeIds.some((challengeId, index) => challengeId !== storedChallengeIds[index])
-	)
-		throw new CtfError("integrity_error", "campaign challenge set does not match");
 	const corpusByChallengeId = new Map<string, (typeof options.challenges)[number]>(
 		options.challenges.map(entry => [entry.source.challengeId, entry]),
 	);
+	if (corpusByChallengeId.size !== state.challenges.length)
+		throw new CtfError("integrity_error", "campaign challenge set does not match");
+	for (const challenge of state.challenges) {
+		const entry = corpusByChallengeId.get(challenge.challengeId);
+		if (
+			entry === undefined ||
+			!digestsEqual(challenge.inputDigest, campaignInputDigest(entry, options.backend.id)) ||
+			(challenge.materialized !== undefined && !materializedMatchesEntry(challenge.materialized, entry))
+		)
+			throw new CtfError("integrity_error", "campaign challenge input identity does not match");
+		if (challenge.status === "candidate") {
+			const attempt = challenge.attempts.at(-1);
+			const lineage =
+				options.candidateLineageFor === undefined
+					? undefined
+					: await options.candidateLineageFor({ challengeId: challenge.challengeId });
+			if (
+				attempt?.status !== "candidate" ||
+				lineage === undefined ||
+				!validLineage(lineage) ||
+				!attemptLineageMatches(attempt, lineage)
+			)
+				throw new CtfError("integrity_error", "campaign candidate lineage does not match");
+		}
+	}
 	const materialize = options.materialize ?? defaultMaterializer(options);
 	const materializationOwners = new Set<string>();
 	const runs: CtfBatchScheduleResult[] = [];
@@ -362,10 +487,7 @@ async function runCtfCampaignWithDeadline(
 			.map(challenge => challenge.challengeId);
 		if (pending.length === 0) break;
 		const startedAt = now().toISOString();
-		const materialized = new Map<
-			string,
-			Readonly<{ root: string; provenanceDigest: string; visibleFileDigests: Readonly<Record<string, string>> }>
-		>();
+		const materialized = new Map<string, CampaignMaterialized>();
 		for (const challengeId of pending) {
 			const challenge = state.challenges.find(item => item.challengeId === challengeId);
 			if (challenge === undefined) throw new CtfError("integrity_error", "campaign challenge state is missing");
@@ -433,6 +555,15 @@ async function runCtfCampaignWithDeadline(
 				if (context === undefined)
 					throw new CtfError("integrity_error", "campaign materialized context is missing");
 				const outcomeReason = reason(result.reason);
+				const resultLineage =
+					"producerDigest" in result || "routeDigest" in result
+						? { producerDigest: result.producerDigest, routeDigest: result.routeDigest }
+						: undefined;
+				if (resultLineage !== undefined && !validLineage(resultLineage))
+					throw new CtfError("integrity_error", "campaign result lineage is invalid");
+				// A missing pair is admitted only as the scheduler's no-producer result; candidates always require it.
+				if (status === "candidate" && resultLineage === undefined)
+					throw new CtfError("integrity_error", "candidate result lineage is required");
 				return {
 					...challenge,
 					status,
@@ -446,6 +577,7 @@ async function runCtfCampaignWithDeadline(
 							status,
 							...(outcomeReason === undefined ? {} : { reason: outcomeReason }),
 							artifacts: [...("artifacts" in result ? (result.artifacts ?? []) : [])],
+							...(resultLineage === undefined ? {} : resultLineage),
 							...("artifactEvidence" in result && result.artifactEvidence !== undefined
 								? { artifactEvidence: result.artifactEvidence.map(artifact => ({ ...artifact })) }
 								: {}),
@@ -466,6 +598,8 @@ function validateCampaignOptions(options: CtfCampaignOptions): void {
 		throw new CtfError("invalid_api_request", "maxAttempts must be positive");
 	if (!Number.isSafeInteger(options.concurrency) || options.concurrency < 1)
 		throw new CtfError("invalid_api_request", "concurrency must be positive");
+	if (typeof options.backend.id !== "string" || options.backend.id.trim().length === 0)
+		throw new CtfError("invalid_api_request", "backend id is required");
 }
 
 /** Run resumable, non-scoring attempts over only pinned, materialized corpus files. */

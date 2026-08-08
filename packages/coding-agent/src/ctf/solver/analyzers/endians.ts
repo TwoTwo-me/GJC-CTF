@@ -1,4 +1,4 @@
-import type { LocalSolverAnalyzer } from "../local-backend";
+import { createLocalSolverAnalyzerLifecycle, type LocalSolverAnalyzer } from "../local-backend";
 
 const MAX_SOURCE_BYTES = 4096;
 
@@ -65,13 +65,15 @@ export function analyzeEndiansSource(source: Uint8Array): EndiansAnalysis {
 export function createEndiansAnalyzer(options: Readonly<{ visiblePath: string }>): LocalSolverAnalyzer {
 	return {
 		id: "endians",
-		async analyze(input) {
-			if (input.signal.aborted) return { status: "cancelled", reason: "run cancelled" };
-			const visible = input.visibleFiles.find(file => file.path === options.visiblePath);
-			if (visible === undefined) return { status: "not-applicable" };
-			const analysis = analyzeEndiansSource(visible.content);
-			if (!analysis.ok) return { status: "refused", reason: analysis.reason };
-			return { status: "candidate", result: { candidate: analysis.candidate } };
+		analyze(input) {
+			return createLocalSolverAnalyzerLifecycle(input, async ownedInput => {
+				if (ownedInput.signal.aborted) return { status: "cancelled", reason: "run cancelled" };
+				const visible = ownedInput.visibleFiles.find(file => file.path === options.visiblePath);
+				if (visible === undefined) return { status: "not-applicable" };
+				const analysis = analyzeEndiansSource(visible.content);
+				if (!analysis.ok) return { status: "refused", reason: analysis.reason };
+				return { status: "candidate", result: { candidate: analysis.candidate } };
+			});
 		},
 	};
 }

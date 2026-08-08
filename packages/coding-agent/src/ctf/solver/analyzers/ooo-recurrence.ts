@@ -1,4 +1,4 @@
-import type { LocalSolverAnalyzer } from "../local-backend";
+import { createLocalSolverAnalyzerLifecycle, type LocalSolverAnalyzer } from "../local-backend";
 
 const MAX_SOURCE_BYTES = 256 * 1024;
 const FLAG_PREFIX = "lactf{";
@@ -95,19 +95,21 @@ export function analyzeOooRecurrenceSource(source: string): OooRecurrenceAnalysi
 export function createOooRecurrenceAnalyzer(options: Readonly<{ visiblePath: string }>): LocalSolverAnalyzer {
 	return {
 		id: "ooo-recurrence",
-		async analyze(input) {
-			if (input.signal.aborted) return { status: "cancelled", reason: "run cancelled" };
-			const visible = input.visibleFiles.find(file => file.path === options.visiblePath);
-			if (visible === undefined) return { status: "not-applicable" };
-			let source: string;
-			try {
-				source = new TextDecoder("utf-8", { fatal: true }).decode(visible.content);
-			} catch {
-				return { status: "refused", reason: "checker source is not valid UTF-8" };
-			}
-			const analysis = analyzeOooRecurrenceSource(source);
-			if (!analysis.ok) return { status: "refused", reason: analysis.reason };
-			return { status: "candidate", result: { candidate: analysis.candidate } };
+		analyze(input) {
+			return createLocalSolverAnalyzerLifecycle(input, async ownedInput => {
+				if (ownedInput.signal.aborted) return { status: "cancelled", reason: "run cancelled" };
+				const visible = ownedInput.visibleFiles.find(file => file.path === options.visiblePath);
+				if (visible === undefined) return { status: "not-applicable" };
+				let source: string;
+				try {
+					source = new TextDecoder("utf-8", { fatal: true }).decode(visible.content);
+				} catch {
+					return { status: "refused", reason: "checker source is not valid UTF-8" };
+				}
+				const analysis = analyzeOooRecurrenceSource(source);
+				if (!analysis.ok) return { status: "refused", reason: analysis.reason };
+				return { status: "candidate", result: { candidate: analysis.candidate } };
+			});
 		},
 	};
 }

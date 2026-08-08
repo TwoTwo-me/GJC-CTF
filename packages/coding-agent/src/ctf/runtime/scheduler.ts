@@ -14,6 +14,10 @@ export type CtfSolverOutcome = Readonly<{
 	reason?: string;
 	artifacts?: readonly string[];
 	artifactEvidence?: readonly CtfArtifactEvidence[];
+	/** Immutable identity of the backend that produced this outcome. */
+	producerDigest?: string;
+	/** Immutable reviewed solver-route identity when a route produced this outcome. */
+	routeDigest?: string;
 }>;
 
 export type CtfRunReason =
@@ -106,6 +110,8 @@ export type CtfScheduledRun =
 			reason?: CtfRunReason;
 			artifacts?: readonly string[];
 			artifactEvidence?: readonly CtfArtifactEvidence[];
+			producerDigest?: string;
+			routeDigest?: string;
 	  }>;
 
 export type CtfBatchScheduleRequest = Readonly<{
@@ -235,6 +241,13 @@ function normalizeSolverOutcome(value: unknown): CtfSolverOutcome {
 	if (artifactEvidence !== undefined && !isArtifactEvidenceList(artifactEvidence))
 		return { status: "failed", reason: "solver backend returned invalid artifact evidence" };
 	if (
+		(record.producerDigest !== undefined &&
+			(typeof record.producerDigest !== "string" || !/^[a-f0-9]{64}$/u.test(record.producerDigest))) ||
+		(record.routeDigest !== undefined &&
+			(typeof record.routeDigest !== "string" || !/^[a-f0-9]{64}$/u.test(record.routeDigest)))
+	)
+		return { status: "failed", reason: "solver backend returned invalid provenance identity" };
+	if (
 		artifactEvidence !== undefined &&
 		artifacts !== undefined &&
 		(artifactEvidence.length !== artifacts.length ||
@@ -246,6 +259,8 @@ function normalizeSolverOutcome(value: unknown): CtfSolverOutcome {
 		...(record.reason === undefined ? {} : { reason: record.reason as string }),
 		...(artifacts === undefined ? {} : { artifacts }),
 		...(artifactEvidence === undefined ? {} : { artifactEvidence }),
+		...(record.producerDigest === undefined ? {} : { producerDigest: record.producerDigest as string }),
+		...(record.routeDigest === undefined ? {} : { routeDigest: record.routeDigest as string }),
 	};
 }
 function durableReason(outcome: CtfSolverOutcome): CtfRunReason | undefined {
@@ -272,6 +287,8 @@ function aggregationDigest(results: readonly CtfScheduledRun[]): string {
 			"artifactEvidence" in result
 				? [...(result.artifactEvidence ?? [])].sort((left, right) => left.path.localeCompare(right.path))
 				: undefined,
+		producerDigest: "producerDigest" in result ? result.producerDigest : undefined,
+		routeDigest: "routeDigest" in result ? result.routeDigest : undefined,
 	}));
 	return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }

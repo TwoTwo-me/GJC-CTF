@@ -25,6 +25,13 @@ type EvaluationSpecInput = Omit<EvaluationSpecV1, "specDigest">;
 type EvaluationPreflightInput = Omit<EvaluationPreflightV1, "preflightDigest">;
 
 const DIGEST = "a".repeat(64) as Digest;
+function owned<T>(result: Promise<T> | T): import("../../src/ctf/runtime/evaluation").OwnedEvaluationOperation<T> {
+	return {
+		result: Promise.resolve(result),
+		async terminate() {},
+		quiesced: Promise.resolve(),
+	};
+}
 function spec(maxBytes = 1024): EvaluationSpecV1 {
 	const unsigned: EvaluationSpecInput = {
 		schemaVersion: "ctf-evaluation-spec-1",
@@ -73,22 +80,22 @@ function adapter(destroy: () => Promise<void>, commitments?: string[]): Evaluati
 	return {
 		adapterId: "checker-1",
 		roles: ["checker"],
-		async start(context) {
+		start(context) {
 			commitments?.push(context.instanceCommitmentDigest);
 			expect(context.nonce.startsWith("nonce-")).toBe(true);
 			expect(context.secretLease).toBeDefined();
 			expect(JSON.stringify(context.secretLease)).toBe("{}");
-			return { capability: { kind: "checker", adapterId: "checker-1", available: true }, destroy };
+			return owned({ capability: { kind: "checker", adapterId: "checker-1", available: true }, destroy });
 		},
 	};
 }
 function request(runtime: EvaluationRuntimeAdapter, candidate = "flag"): LocalEvaluationRequest {
 	const value = spec();
 	const checked = preflight();
-	const collectCandidate: CandidateCollector = async context => {
+	const collectCandidate: CandidateCollector = context => {
 		expect(JSON.stringify(context)).not.toContain("secretLease");
 		expect(context.capabilities).toEqual([{ kind: "checker", adapterId: "checker-1", available: true }]);
-		return { encoding: "utf8", value: candidate };
+		return owned({ encoding: "utf8", value: candidate });
 	};
 	return {
 		spec: value,
@@ -127,6 +134,171 @@ describe("local evaluation lifecycle", () => {
 		);
 		expect(result.kind).toBe("candidate");
 		expect(destroyed).toBe(1);
+	});
+	it("rejects substituted and browser capabilities before candidate collection", async () => {
+		let collected = false;
+		const substituted: EvaluationRuntimeAdapter = {
+			adapterId: "checker-1",
+			roles: ["checker"],
+			start() {
+				return owned({
+					capability: {
+						kind: "browser",
+						adapterId: "checker-1",
+						origin: "http://127.0.0.1:3000",
+						entryPath: "index.html",
+						downloads: false,
+						rawCdp: false,
+					},
+					async destroy() {},
+				} as never);
+			},
+		};
+		const result = await evaluateLocalCandidate({
+			...request(substituted),
+			collectCandidate: () => {
+				collected = true;
+				return owned({ encoding: "utf8", value: "candidate" });
+			},
+		});
+		expect(result).toMatchObject({ kind: "unavailable", sanitizedReason: "adapter identity mismatch" });
+		expect(collected).toBe(false);
+	});
+	it("rejects capability objects with extra keys, accessors, or non-plain prototypes", async () => {
+		for (const capability of [
+			{ kind: "checker", adapterId: "checker-1", available: true, extra: true },
+			Object.defineProperty({ kind: "checker", adapterId: "checker-1" }, "available", {
+				enumerable: true,
+				get: () => true,
+			}),
+			Object.assign(Object.create({ inherited: true }), {
+				kind: "checker",
+				adapterId: "checker-1",
+				available: true,
+			}),
+		]) {
+			let collected = false;
+			const runtime: EvaluationRuntimeAdapter = {
+				adapterId: "checker-1",
+				roles: ["checker"],
+				start() {
+					return owned({ capability: capability as never, async destroy() {} });
+				},
+			};
+			const result = await evaluateLocalCandidate({
+				...request(runtime),
+				collectCandidate: () => {
+					collected = true;
+					return owned({ encoding: "utf8", value: "candidate" });
+				},
+			});
+			expect(result).toMatchObject({ kind: "unavailable", sanitizedReason: "adapter identity mismatch" });
+			expect(collected).toBe(false);
+		}
+	});
+	it("cancels a late start and destroys its eventual session", async () => {
+		const controller = new AbortController();
+		let destroyed = 0;
+		const runtime: EvaluationRuntimeAdapter = {
+			adapterId: "checker-1",
+			roles: ["checker"],
+			start() {
+				controller.abort();
+				const session = {
+					capability: { kind: "checker" as const, adapterId: "checker-1", available: true as const },
+					async destroy() {
+						destroyed++;
+					},
+				};
+				const quiesced = Promise.withResolvers<void>();
+				return {
+					result: Promise.resolve(session),
+					terminate: async () => {
+						await session.destroy();
+						quiesced.resolve();
+					},
+					quiesced: quiesced.promise,
+				};
+			},
+		};
+		const result = await evaluateLocalCandidate({ ...request(runtime), signal: controller.signal });
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(result).toMatchObject({ kind: "unavailable", sanitizedReason: "evaluation cancelled" });
+		expect(destroyed).toBe(1);
+	});
+	it("terminates an operation when successful-result quiescence fails", async () => {
+		let terminated = 0;
+		const runtime: EvaluationRuntimeAdapter = {
+			adapterId: "checker-1",
+			roles: ["checker"],
+			start() {
+				return {
+					result: Promise.resolve({
+						capability: { kind: "checker", adapterId: "checker-1", available: true },
+						async destroy() {},
+					}),
+					terminate: async () => {
+						terminated++;
+					},
+					quiesced: Promise.reject(new Error("operation quiescence rejected")),
+				};
+			},
+		};
+		const result = await evaluateLocalCandidate(request(runtime));
+		expect(result).toMatchObject({ kind: "unavailable", sanitizedReason: "evaluation cleanup failed" });
+		expect(terminated).toBe(1);
+	});
+	it("bounds hung candidate collection and signals cancellation", async () => {
+		let observedAbort = false;
+		const result = await evaluateLocalCandidate({
+			...request(adapter(async () => {})),
+			deadline: Date.now() + 20,
+			collectCandidate: context => ({
+				result: new Promise<never>(() => {
+					context.signal?.addEventListener(
+						"abort",
+						() => {
+							observedAbort = true;
+						},
+						{ once: true },
+					);
+				}),
+				async terminate() {},
+				quiesced: Promise.resolve(),
+			}),
+		});
+		expect(result).toMatchObject({ kind: "unavailable", sanitizedReason: "evaluation cancelled" });
+		expect(observedAbort).toBe(true);
+	});
+	it("fails closed when destroy or sink revocation does not acknowledge cleanup", async () => {
+		const sink: SecretSink = {
+			role: "checker",
+			async writeOnce() {},
+			async revoke() {
+				await new Promise<never>(() => {});
+			},
+		};
+		const runtime: EvaluationRuntimeAdapter = {
+			adapterId: "checker-1",
+			roles: ["checker"],
+			start(context) {
+				return owned(
+					(async () => {
+						if (context.secretLease === undefined) throw new Error("missing lease");
+						await deliverSecretLease(context.secretLease, "checker", sink);
+						return {
+							capability: { kind: "checker" as const, adapterId: "checker-1", available: true as const },
+							async destroy() {
+								await new Promise<never>(() => {});
+							},
+						};
+					})(),
+				);
+			},
+		};
+		const result = await evaluateLocalCandidate(request(runtime));
+		expect(result).toMatchObject({ kind: "unavailable", sanitizedReason: "evaluation cleanup failed" });
 	});
 	it("does not return a candidate when session destruction fails", async () => {
 		let destroyed = 0;
@@ -172,9 +344,7 @@ describe("local evaluation lifecycle", () => {
 					destroyed++;
 				}),
 			),
-			collectCandidate: async () => {
-				throw new Error("sensitive-marker-collector");
-			},
+			collectCandidate: () => owned(Promise.reject(new Error("sensitive-marker-collector"))),
 		};
 		const failedResult = await evaluateLocalCandidate(failed);
 		expect(failedResult).toMatchObject({ kind: "unavailable", sanitizedReason: "candidate collection failed" });
@@ -186,9 +356,9 @@ describe("local evaluation lifecycle", () => {
 					destroyed++;
 				}),
 			),
-			collectCandidate: async () => {
+			collectCandidate: () => {
 				controller.abort();
-				return { encoding: "utf8" as const, value: "flag" };
+				return owned({ encoding: "utf8" as const, value: "flag" });
 			},
 			signal: controller.signal,
 		};
@@ -209,7 +379,7 @@ describe("local evaluation lifecycle", () => {
 		).toBe("unavailable");
 		const bad = {
 			...request(adapter(async () => {})),
-			collectCandidate: async () => ({ encoding: "base64" as const, value: "Zm9v" }),
+			collectCandidate: () => owned({ encoding: "base64" as const, value: "Zm9v" }),
 		};
 		expect((await evaluateLocalCandidate(bad)).kind).toBe("unavailable");
 	});
@@ -225,13 +395,17 @@ describe("local evaluation lifecycle", () => {
 		const runtime: EvaluationRuntimeAdapter = {
 			adapterId: "checker-1",
 			roles: ["checker"],
-			async start(context) {
-				if (context.secretLease === undefined) throw new Error("missing lease");
-				await deliverSecretLease(context.secretLease, "checker", sink);
-				return {
-					capability: { kind: "checker", adapterId: "checker-1", available: true },
-					async destroy() {},
-				};
+			start(context) {
+				return owned(
+					(async () => {
+						if (context.secretLease === undefined) throw new Error("missing lease");
+						await deliverSecretLease(context.secretLease, "checker", sink);
+						return {
+							capability: { kind: "checker" as const, adapterId: "checker-1", available: true as const },
+							async destroy() {},
+						};
+					})(),
+				);
 			},
 		};
 		expect((await evaluateLocalCandidate(request(runtime))).kind).toBe("candidate");
@@ -252,10 +426,14 @@ describe("local evaluation lifecycle", () => {
 		const runtime: EvaluationRuntimeAdapter = {
 			adapterId: "checker-1",
 			roles: ["checker"],
-			async start(context) {
-				if (context.secretLease === undefined) throw new Error("missing lease");
-				await deliverSecretLease(context.secretLease, "checker", sink);
-				throw new Error("unreachable");
+			start(context) {
+				return owned(
+					(async () => {
+						if (context.secretLease === undefined) throw new Error("missing lease");
+						await deliverSecretLease(context.secretLease, "checker", sink);
+						throw new Error("unreachable");
+					})(),
+				);
 			},
 		};
 		const result = await evaluateLocalCandidate(request(runtime));
@@ -278,11 +456,11 @@ describe("local evaluation lifecycle", () => {
 		const adapterSpec = spec().adapters[0];
 		if (adapterSpec?.kind !== "offline-checker") throw new Error("fixture must provide an offline checker");
 		const runtime = createOfflineCheckerAdapter(adapterSpec, {
-			async createSecretSink() {
-				return sink;
+			createSecretSink() {
+				return owned(sink);
 			},
-			async prepare() {
-				return { async destroy() {} };
+			prepare() {
+				return owned({ async destroy() {} });
 			},
 		});
 		expect((await evaluateLocalCandidate(request(runtime))).kind).toBe("candidate");
@@ -294,18 +472,18 @@ describe("local evaluation lifecycle", () => {
 		const adapterSpec = spec().adapters[0];
 		if (adapterSpec?.kind !== "offline-checker") throw new Error("fixture must provide an offline checker");
 		const runtime = createOfflineCheckerAdapter(adapterSpec, {
-			async createSecretSink() {
-				return {
+			createSecretSink() {
+				return owned({
 					role: "checker",
 					async writeOnce() {},
 					async revoke() {
 						revoked++;
 						throw new Error("secret flag /tmp/sink");
 					},
-				};
+				});
 			},
-			async prepare() {
-				throw new Error("driver startup failed");
+			prepare() {
+				return owned(Promise.reject(new Error("driver startup failed")));
 			},
 		});
 		const result = await evaluateLocalCandidate(request(runtime));
@@ -323,25 +501,29 @@ describe("local evaluation lifecycle", () => {
 		const runtime: EvaluationRuntimeAdapter = {
 			adapterId: "checker-1",
 			roles: ["checker"],
-			async start(context) {
-				if (context.secretLease === undefined) throw new Error("missing lease");
-				try {
-					await deliverSecretLease(context.secretLease, "service", sink);
-				} catch {
-					wrongRole = true;
-				}
-				await deliverSecretLease(context.secretLease, "checker", sink);
-				try {
-					await deliverSecretLease(context.secretLease, "checker", sink);
-				} catch {
-					replay = true;
-				}
-				return {
-					capability: { kind: "checker", adapterId: "checker-1", available: true },
-					async destroy() {
-						await sink.revoke();
-					},
-				};
+			start(context) {
+				return owned(
+					(async () => {
+						if (context.secretLease === undefined) throw new Error("missing lease");
+						try {
+							await deliverSecretLease(context.secretLease, "service", sink);
+						} catch {
+							wrongRole = true;
+						}
+						await deliverSecretLease(context.secretLease, "checker", sink);
+						try {
+							await deliverSecretLease(context.secretLease, "checker", sink);
+						} catch {
+							replay = true;
+						}
+						return {
+							capability: { kind: "checker" as const, adapterId: "checker-1", available: true as const },
+							async destroy() {
+								await sink.revoke();
+							},
+						};
+					})(),
+				);
 			},
 		};
 		expect((await evaluateLocalCandidate(request(runtime))).kind).toBe("candidate");
@@ -395,7 +577,7 @@ describe("local evaluation lifecycle", () => {
 		);
 		const identities: Array<Record<string, unknown>> = [];
 		const executor: TrustedOracleExecutor = {
-			async execute({ identity, candidate }) {
+			execute({ identity, candidate }) {
 				identities.push({ ...identity });
 				expect(new TextDecoder().decode(candidate)).toBe("synthetic-candidate");
 				const unsigned = {
@@ -407,7 +589,7 @@ describe("local evaluation lifecycle", () => {
 					outputDigest: DIGEST,
 					sanitizedSummary: "pass" as const,
 				};
-				return {
+				return owned({
 					registry: { registry, keys: [registryKey, resultKey] },
 					result: {
 						...unsigned,
@@ -415,7 +597,7 @@ describe("local evaluation lifecycle", () => {
 							"base64",
 						),
 					},
-				};
+				});
 			},
 		};
 		const evidenceRequest = (evaluationId = "evaluation-1") => {
@@ -447,7 +629,7 @@ describe("local evaluation lifecycle", () => {
 		expect(JSON.stringify(passed)).not.toContain("synthetic-candidate");
 		expect(identities).toHaveLength(1);
 		const failedExecutor: TrustedOracleExecutor = {
-			async execute({ identity }) {
+			execute({ identity }) {
 				const unsigned = {
 					schemaVersion: "ctf-oracle-result-2" as const,
 					oracleId: entry.oracleId,
@@ -457,7 +639,7 @@ describe("local evaluation lifecycle", () => {
 					outputDigest: DIGEST,
 					sanitizedSummary: "fail" as const,
 				};
-				return {
+				return owned({
 					registry: { registry, keys: [registryKey, resultKey] },
 					result: {
 						...unsigned,
@@ -465,7 +647,7 @@ describe("local evaluation lifecycle", () => {
 							"base64",
 						),
 					},
-				};
+				});
 			},
 		};
 		const failed = await evaluateLocalCandidate({ ...evidenceRequest(), trustedOracleExecutor: failedExecutor });
@@ -478,7 +660,7 @@ describe("local evaluation lifecycle", () => {
 		expect(identities[0]?.instanceCommitmentDigest).not.toBe(identities[1]?.instanceCommitmentDigest);
 
 		const wrongCommitment: TrustedOracleExecutor = {
-			async execute({ identity }) {
+			execute({ identity }) {
 				const unsigned = {
 					schemaVersion: "ctf-oracle-result-2" as const,
 					oracleId: entry.oracleId,
@@ -488,7 +670,7 @@ describe("local evaluation lifecycle", () => {
 					outputDigest: DIGEST,
 					sanitizedSummary: "pass" as const,
 				};
-				return {
+				return owned({
 					registry: { registry, keys: [registryKey, resultKey] },
 					result: {
 						...unsigned,
@@ -496,7 +678,7 @@ describe("local evaluation lifecycle", () => {
 							"base64",
 						),
 					},
-				};
+				});
 			},
 		};
 		expect(
@@ -504,7 +686,7 @@ describe("local evaluation lifecycle", () => {
 		).toBe("unavailable");
 		let replay: Parameters<TrustedOracleExecutor["execute"]>[0]["identity"] | undefined;
 		const replayExecutor: TrustedOracleExecutor = {
-			async execute({ identity }) {
+			execute({ identity }) {
 				const replayIdentity = replay ?? identity;
 				replay = replayIdentity;
 				const unsigned = {
@@ -516,7 +698,7 @@ describe("local evaluation lifecycle", () => {
 					outputDigest: DIGEST,
 					sanitizedSummary: "pass" as const,
 				};
-				return {
+				return owned({
 					registry: { registry, keys: [registryKey, resultKey] },
 					result: {
 						...unsigned,
@@ -524,7 +706,7 @@ describe("local evaluation lifecycle", () => {
 							"base64",
 						),
 					},
-				};
+				});
 			},
 		};
 		await evaluateLocalCandidate({ ...evidenceRequest(), trustedOracleExecutor: replayExecutor });
@@ -554,19 +736,23 @@ describe("local evaluation lifecycle", () => {
 				{
 					adapterId: "checker-1",
 					roles: ["checker"],
-					async start(context) {
-						if (context.secretLease === undefined) throw new Error("missing lease");
-						await deliverSecretLease(context.secretLease, "checker", {
-							role: "checker",
-							async writeOnce() {},
-							async revoke() {
-								throw new Error("synthetic revocation failure");
-							},
-						});
-						return {
-							capability: { kind: "checker", adapterId: "checker-1", available: true },
-							async destroy() {},
-						};
+					start(context) {
+						return owned(
+							(async () => {
+								if (context.secretLease === undefined) throw new Error("missing lease");
+								await deliverSecretLease(context.secretLease, "checker", {
+									role: "checker",
+									async writeOnce() {},
+									async revoke() {
+										throw new Error("synthetic revocation failure");
+									},
+								});
+								return {
+									capability: { kind: "checker" as const, adapterId: "checker-1", available: true as const },
+									async destroy() {},
+								};
+							})(),
+						);
 					},
 				},
 			],
@@ -584,13 +770,38 @@ describe("local evaluation lifecycle", () => {
 		const controller = new AbortController();
 		const cancelled = await evaluateLocalCandidate({
 			...evidenceRequest(),
-			collectCandidate: async () => {
+			collectCandidate: () => {
 				controller.abort();
-				return { encoding: "utf8", value: "synthetic-candidate" };
+				return owned({ encoding: "utf8", value: "synthetic-candidate" });
 			},
 			signal: controller.signal,
 		});
 		expect(cancelled.kind).toBe("unavailable");
+		let oracleAborted = false;
+		const hungOracle: TrustedOracleExecutor = {
+			execute({ signal }) {
+				return {
+					result: new Promise<never>(() => {
+						signal?.addEventListener(
+							"abort",
+							() => {
+								oracleAborted = true;
+							},
+							{ once: true },
+						);
+					}),
+					async terminate() {},
+					quiesced: Promise.resolve(),
+				};
+			},
+		};
+		const hungOracleResult = await evaluateLocalCandidate({
+			...evidenceRequest(),
+			trustedOracleExecutor: hungOracle,
+			deadline: Date.now() + 20,
+		});
+		expect(hungOracleResult).toMatchObject({ kind: "unavailable", sanitizedReason: "evaluation cancelled" });
+		expect(oracleAborted).toBe(true);
 	});
 });
 describe("browser adapter", () => {

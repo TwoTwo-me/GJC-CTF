@@ -22,10 +22,11 @@ import {
 	evaluateLocalCandidate,
 	type CandidateCollector,
 	type EvaluationLineageInput,
+	type EvaluationReceiptAuthority,
 	type EvaluationRuntimeAdapter,
-	type TrustedOracleCallback,
+	type TrustedOracleExecutor,
 } from "../../packages/coding-agent/src/ctf/runtime/evaluation";
-import type { TrustedOracleRegistry } from "../../packages/coding-agent/src/ctf/runtime/oracle";
+import type { AnchoredOracleAuthority } from "../../packages/coding-agent/src/ctf/runtime/oracle";
 
 export type LocalEvaluationBinding = Readonly<{
 	challengeId: string;
@@ -53,8 +54,9 @@ export type LocalEvaluationRunnerRequest = Readonly<{
 	lineage: EvaluationLineageInput;
 	adapters: readonly EvaluationRuntimeAdapter[];
 	createCandidateCollector: (corpus: MaterializedCorpus) => CandidateCollector | Promise<CandidateCollector>;
-	trustedOracle?: TrustedOracleRegistry;
-	requestOracle?: TrustedOracleCallback;
+	receiptAuthority?: EvaluationReceiptAuthority;
+	oracleAuthority?: AnchoredOracleAuthority;
+	trustedOracleExecutor?: TrustedOracleExecutor;
 	signal?: AbortSignal;
 }>;
 
@@ -189,8 +191,11 @@ export async function runLocalEvaluation(request: LocalEvaluationRunnerRequest):
 			lineage: request.lineage,
 			adapters: request.adapters,
 			collectCandidate,
-			...(request.trustedOracle === undefined ? {} : { trustedOracle: request.trustedOracle }),
-			...(request.requestOracle === undefined ? {} : { requestOracle: request.requestOracle }),
+			...(request.receiptAuthority === undefined ? {} : { receiptAuthority: request.receiptAuthority }),
+			...(request.oracleAuthority === undefined ? {} : { oracleAuthority: request.oracleAuthority }),
+			...(request.trustedOracleExecutor === undefined
+				? {}
+				: { trustedOracleExecutor: request.trustedOracleExecutor }),
 			...(request.signal === undefined ? {} : { signal: request.signal }),
 		});
 		return { status: "evaluated", scored: false, binding, result };

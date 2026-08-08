@@ -3,13 +3,15 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CTF_CAMPAIGN_HARD_STOP, runCtfCampaign } from "../../src/ctf/campaign/controller";
-import { sha256Hex } from "../../src/ctf/contracts/digest";
+import { canonicalDigest, sha256Hex } from "../../src/ctf/contracts/digest";
 import type { CorpusEntry, MaterializedCorpus } from "../../src/ctf/corpus";
 import { LACTF_2026_CORPUS_SOURCES } from "../../src/ctf/corpus";
 import type { CtfSolverBackend, CtfTerminationRequest } from "../../src/ctf/runtime/scheduler";
 
 const roots: string[] = [];
 const digest = sha256Hex("campaign-fixture");
+const producerDigest = sha256Hex("campaign-producer");
+const routeDigest = sha256Hex("campaign-route");
 
 function corpusEntry(): CorpusEntry {
 	const source = LACTF_2026_CORPUS_SOURCES[0];
@@ -75,14 +77,32 @@ function options(
 		competitionId: "competition-1",
 		challenges: [corpusEntry()],
 		store: root,
-		backend: { ...backend, terminate: backend.terminate ?? (async () => {}) },
+		backend: {
+			...backend,
+			terminate: backend.terminate ?? (async () => {}),
+			solve: async request => {
+				const outcome = await backend.solve(request);
+				return outcome.status === "candidate" ? { ...outcome, producerDigest, routeDigest } : outcome;
+			},
+		},
 		authorityFor,
+		candidateLineageFor: async () => ({ producerDigest, routeDigest }),
 		terminateAuthority: async ({ ownerId }) => ({ ownerId }),
 		concurrency: 1,
 		maxAttempts,
 		materialize: Object.assign(async () => corpus, { terminate: async () => {} }),
 		...additional,
 	};
+}
+async function rewriteCampaignState(root: string, mutate: (challenge: Record<string, unknown>) => void): Promise<void> {
+	const target = path.join(root, "campaigns", "campaign-1.json");
+	const state = JSON.parse(await fs.readFile(target, "utf8")) as Record<string, unknown>;
+	if (!Array.isArray(state.challenges) || !state.challenges[0] || typeof state.challenges[0] !== "object")
+		throw new Error("campaign fixture state is invalid");
+	mutate(state.challenges[0] as Record<string, unknown>);
+	const { stateDigest: _stateDigest, ...basis } = state;
+	state.stateDigest = canonicalDigest(basis);
+	await fs.writeFile(target, JSON.stringify(state), "utf8");
 }
 
 describe("durable CTF campaign", () => {
@@ -108,6 +128,7 @@ describe("durable CTF campaign", () => {
 		expect(first.state.challenges[0]?.attempts[0]?.artifactEvidence).toEqual([
 			{ path: "candidate.txt", digest: "d".repeat(64), size: 42 },
 		]);
+		expect(first.state.challenges[0]?.attempts[0]).toMatchObject({ producerDigest, routeDigest });
 		const resumed = await runCtfCampaign(options(root, corpus, backend, 2));
 		expect(resumed.state.stateDigest).toBe(first.state.stateDigest);
 		expect(calls).toBe(1);
@@ -338,5 +359,109 @@ describe("durable CTF campaign", () => {
 			code: "integrity_error",
 		});
 		expect(backendCalls).toBe(0);
+	});
+	it("rejects resume when a same-ID corpus or backend producer changes", async () => {
+		const { root, corpus } = await fixture();
+		let calls = 0;
+		const backend: CtfSolverBackend = {
+			id: "fixture-backend",
+			solve: async () => {
+				calls += 1;
+				return { status: "candidate" };
+			},
+		};
+		await runCtfCampaign(options(root, corpus, backend, 1));
+		const substitutedEntry: CorpusEntry = {
+			...corpusEntry(),
+			provenance: {
+				...corpusEntry().provenance,
+				files: corpusEntry().provenance.files.map(file => ({
+					...file,
+					sha256: sha256Hex("same-id-substituted-corpus"),
+				})),
+			},
+		};
+		await expect(
+			runCtfCampaign(options(root, corpus, backend, 1, { challenges: [substitutedEntry] })),
+		).rejects.toMatchObject({ code: "integrity_error" });
+		await expect(
+			runCtfCampaign(options(root, corpus, { ...backend, id: "substituted-producer" }, 1)),
+		).rejects.toMatchObject({ code: "integrity_error" });
+		expect(calls).toBe(1);
+	});
+
+	it("rejects tampered serialized materialization routes and digests", async () => {
+		const { root, corpus } = await fixture();
+		const backend: CtfSolverBackend = { id: "fixture-backend", solve: async () => ({ status: "candidate" }) };
+		await runCtfCampaign(options(root, corpus, backend, 1));
+		const target = path.join(root, "campaigns", "campaign-1.json");
+		const originalState = await fs.readFile(target, "utf8");
+		await rewriteCampaignState(root, challenge => {
+			const materialized = challenge.materialized as Record<string, unknown>;
+			materialized.root = "relative-substitution";
+		});
+		await expect(runCtfCampaign(options(root, corpus, backend, 1))).rejects.toMatchObject({
+			code: "integrity_error",
+		});
+
+		await fs.writeFile(target, originalState, "utf8");
+		await rewriteCampaignState(root, challenge => {
+			const materialized = challenge.materialized as Record<string, unknown>;
+			materialized.provenanceDigest = "e".repeat(64);
+		});
+		await expect(runCtfCampaign(options(root, corpus, backend, 1))).rejects.toMatchObject({
+			code: "integrity_error",
+		});
+		await fs.writeFile(target, originalState, "utf8");
+		await rewriteCampaignState(root, challenge => {
+			const materialized = challenge.materialized as Record<string, unknown>;
+			const visibleFileDigests = materialized.visibleFileDigests as Record<string, unknown>;
+			visibleFileDigests["chall.txt"] = "f".repeat(64);
+		});
+		await expect(runCtfCampaign(options(root, corpus, backend, 1))).rejects.toMatchObject({
+			code: "integrity_error",
+		});
+	});
+	it("rejects resumed candidates with missing, tampered, or mismatched route lineage", async () => {
+		const { root, corpus } = await fixture();
+		const backend: CtfSolverBackend = { id: "fixture-backend", solve: async () => ({ status: "candidate" }) };
+		await runCtfCampaign(options(root, corpus, backend, 1));
+		const target = path.join(root, "campaigns", "campaign-1.json");
+		const originalState = await fs.readFile(target, "utf8");
+
+		await rewriteCampaignState(root, challenge => {
+			delete (challenge.attempts as Record<string, unknown>[])[0]?.routeDigest;
+		});
+		await expect(runCtfCampaign(options(root, corpus, backend, 1))).rejects.toMatchObject({
+			code: "integrity_error",
+		});
+
+		await fs.writeFile(target, originalState, "utf8");
+		await rewriteCampaignState(root, challenge => {
+			(challenge.attempts as Record<string, unknown>[])[0]!.producerDigest = "c".repeat(64);
+		});
+		await expect(runCtfCampaign(options(root, corpus, backend, 1))).rejects.toMatchObject({
+			code: "integrity_error",
+		});
+
+		await fs.writeFile(target, originalState, "utf8");
+		await expect(
+			runCtfCampaign(
+				options(root, corpus, backend, 1, {
+					candidateLineageFor: async () => ({ producerDigest, routeDigest: sha256Hex("mismatched-route") }),
+				}),
+			),
+		).rejects.toMatchObject({ code: "integrity_error" });
+	});
+	it("rejects candidate outcomes without a complete lineage pair", async () => {
+		const { root, corpus } = await fixture();
+		const backend: CtfSolverBackend = {
+			id: "fixture-backend",
+			terminate: async () => {},
+			solve: async () => ({ status: "candidate", producerDigest }),
+		};
+		await expect(runCtfCampaign(options(root, corpus, backend, 1, { backend }))).rejects.toMatchObject({
+			code: "integrity_error",
+		});
 	});
 });

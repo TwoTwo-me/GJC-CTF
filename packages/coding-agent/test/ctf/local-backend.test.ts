@@ -6,12 +6,30 @@ import { type Digest, sha256Hex } from "../../src/ctf/contracts/digest";
 import { type CtfSolverRequest, scheduleCtfRuns } from "../../src/ctf/runtime/scheduler";
 import {
 	createLocalCtfSolverBackend,
+	createLocalCtfSolverFixtureBackend,
+	type LocalSolverAnalyzerLifecycle,
+	type LocalSolverAnalyzerResult,
+	type LocalSolverSession,
 	type LocalSolverSessionInput,
 	type LocalSolverSessionResult,
 } from "../../src/ctf/solver/local-backend";
 import { solverRouteFor } from "../../src/ctf/solver/router";
 import { makeDescriptor } from "./fixtures";
 
+const sessionLifecycle = (session: LocalSolverSession) => ({
+	session: Promise.resolve(session),
+	terminate: async () => {},
+	quiesced: Promise.resolve(),
+});
+const analyzerLifecycle = (
+	result: LocalSolverAnalyzerResult | Promise<LocalSolverAnalyzerResult>,
+	quiesced: Promise<void> = Promise.resolve(),
+	terminate: LocalSolverAnalyzerLifecycle["terminate"] = async () => {},
+): LocalSolverAnalyzerLifecycle => ({
+	result: Promise.resolve(result),
+	terminate,
+	quiesced,
+});
 const visibleDigest = (content: string): Digest => sha256Hex(content);
 const request = (
 	challengeId = "challenge-1",
@@ -56,17 +74,18 @@ describe("local GJC solver backend", () => {
 			analyzers: [
 				{
 					id: "not-so-lazy-trigrams",
-					analyze: async () => ({ status: "not-applicable" }),
+					analyze: () => analyzerLifecycle({ status: "not-applicable" }),
 				},
 			],
-			createSession: async () => ({
-				solve: async input => {
-					seen.push(input);
-					return { candidate: "candidate-value" };
-				},
-			}),
+			createSession: () =>
+				sessionLifecycle({
+					solve: async input => {
+						seen.push(input);
+						return { candidate: "candidate-value" };
+					},
+				}),
 		});
-		await expect(backend.solve(request("lactf-2026-crypto-not-so-lazy-trigrams", root))).resolves.toEqual({
+		await expect(backend.solve(request("lactf-2026-crypto-not-so-lazy-trigrams", root))).resolves.toMatchObject({
 			status: "candidate",
 			artifacts: ["run-1/candidate.txt"],
 			artifactEvidence: [
@@ -99,17 +118,18 @@ describe("local GJC solver backend", () => {
 			analyzers: [
 				{
 					id: "endians",
-					analyze: async () => ({ status: "candidate", result: { candidate: "analyzer-candidate" } }),
+					analyze: () => analyzerLifecycle({ status: "candidate", result: { candidate: "analyzer-candidate" } }),
 				},
 			],
-			createSession: async () => ({
-				solve: async () => {
-					agentInvocations++;
-					return { candidate: "agent-candidate" };
-				},
-			}),
+			createSession: () =>
+				sessionLifecycle({
+					solve: async () => {
+						agentInvocations++;
+						return { candidate: "agent-candidate" };
+					},
+				}),
 		});
-		await expect(backend.solve(request("lactf-2026-misc-endians", root))).resolves.toEqual({
+		await expect(backend.solve(request("lactf-2026-misc-endians", root))).resolves.toMatchObject({
 			status: "candidate",
 			artifacts: ["run-1/candidate.txt"],
 			artifactEvidence: [
@@ -141,24 +161,24 @@ describe("local GJC solver backend", () => {
 			analyzers: [
 				{
 					id: "ooo-recurrence",
-					analyze: async () => {
+					analyze: () => {
 						calls.push("ooo");
-						return { status: "not-applicable" };
+						return analyzerLifecycle({ status: "not-applicable" });
 					},
 				},
 				{
 					id: "endians",
-					analyze: async input => {
+					analyze: input => {
 						calls.push("endians");
 						expect(input).not.toHaveProperty("root");
 						expect(input).not.toHaveProperty("artifactRoot");
 						expect(input.routeDigest).toBe(solverRouteFor("lactf-2026-misc-endians").routeDigest);
 						expect(input.analyzerIds).toEqual(["endians"]);
-						return { status: "candidate", result: { candidate: "route-candidate" } };
+						return analyzerLifecycle({ status: "candidate", result: { candidate: "route-candidate" } });
 					},
 				},
 			],
-			createSession: async () => ({ solve: async () => ({ candidate: "agent-candidate" }) }),
+			createSession: () => sessionLifecycle({ solve: async () => ({ candidate: "agent-candidate" }) }),
 		});
 		await expect(backend.solve(request("lactf-2026-misc-endians", root))).resolves.toMatchObject({
 			status: "candidate",
@@ -179,7 +199,7 @@ describe("local GJC solver backend", () => {
 			root,
 			artifactRoot,
 			challenges: new Map([["lactf-2026-misc-endians", descriptor]]),
-			createSession: async () => ({ solve: async () => ({ candidate: "agent-candidate" }) }),
+			createSession: () => sessionLifecycle({ solve: async () => ({ candidate: "agent-candidate" }) }),
 		};
 		const missing = createLocalCtfSolverBackend(base);
 		await expect(missing.solve(request("lactf-2026-misc-endians", root))).resolves.toMatchObject({
@@ -189,20 +209,20 @@ describe("local GJC solver backend", () => {
 			createLocalCtfSolverBackend({
 				...base,
 				analyzers: [
-					{ id: "endians", analyze: async () => ({ status: "not-applicable" }) },
-					{ id: "endians", analyze: async () => ({ status: "not-applicable" }) },
+					{ id: "endians", analyze: () => analyzerLifecycle({ status: "not-applicable" }) },
+					{ id: "endians", analyze: () => analyzerLifecycle({ status: "not-applicable" }) },
 				],
 			}),
 		).toThrow(/more than once/);
 		expect(() =>
 			createLocalCtfSolverBackend({
 				...base,
-				analyzers: [{ id: "unknown", analyze: async () => ({ status: "not-applicable" }) }],
+				analyzers: [{ id: "unknown", analyze: () => analyzerLifecycle({ status: "not-applicable" }) }],
 			}),
 		).toThrow(/not declared/);
 		const backend = createLocalCtfSolverBackend({
 			...base,
-			analyzers: [{ id: "endians", analyze: async () => ({ status: "not-applicable" }) }],
+			analyzers: [{ id: "endians", analyze: () => analyzerLifecycle({ status: "not-applicable" }) }],
 		});
 		const tampered = structuredClone(solverRouteFor("lactf-2026-misc-endians")) as Record<string, unknown>;
 		tampered.modelPattern = "tampered";
@@ -216,11 +236,383 @@ describe("local GJC solver backend", () => {
 			}),
 		).resolves.toMatchObject({ status: "blocked" });
 	});
+	it("does not allow a fixture descriptor to enable an unreviewed production route", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));
+		const artifactRoot = path.join(root, "artifacts");
+		await fs.mkdir(artifactRoot);
+		await fs.writeFile(path.join(root, "answer.txt"), "visible");
+		let invoked = false;
+		const backend = createLocalCtfSolverBackend({
+			root,
+			artifactRoot,
+			challenges: new Map([["fixture-only", makeDescriptor({ id: "fixture-only" })]]),
+			createSession: () => {
+				invoked = true;
+				return sessionLifecycle({ solve: async () => ({ candidate: "unexpected" }) });
+			},
+		});
+
+		await expect(backend.solve(request("fixture-only", root))).resolves.toMatchObject({
+			status: "blocked",
+			reason: "challenge solver route is not reviewed",
+		});
+		expect(invoked).toBe(false);
+	});
+
+	it("fails closed for browser routes before matching or invoking a provider", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));
+		const artifactRoot = path.join(root, "artifacts");
+		await fs.mkdir(artifactRoot);
+		await fs.writeFile(path.join(root, "answer.txt"), "visible");
+		let providerOpened = false;
+		let sessionCreated = false;
+		const route = solverRouteFor("lactf-2026-web-single-trust");
+		const backend = createLocalCtfSolverBackend({
+			root,
+			artifactRoot,
+			challenges: new Map([
+				[
+					"lactf-2026-web-single-trust",
+					makeDescriptor({ id: "lactf-2026-web-single-trust", visibleArtifactAllowlist: ["answer.txt"] }),
+				],
+			]),
+			adapterProviders: [
+				{
+					challengeId: route.challengeId,
+					routeDigest: route.routeDigest,
+					adapterKind: "browser-session",
+					open: () => {
+						providerOpened = true;
+						throw new Error("provider must not open");
+					},
+				},
+			],
+			createSession: () => {
+				sessionCreated = true;
+				return sessionLifecycle({ solve: async () => ({ candidate: "unexpected" }) });
+			},
+		});
+
+		await expect(backend.solve(request("lactf-2026-web-single-trust", root))).resolves.toMatchObject({
+			status: "blocked",
+			reason: "browser-session routes are disabled",
+		});
+		expect(providerOpened).toBe(false);
+		expect(sessionCreated).toBe(false);
+	});
+
+	it("does not solve after adapter acquisition or session creation completes after cancellation", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));
+		const artifactRoot = path.join(root, "artifacts");
+		await fs.mkdir(artifactRoot);
+		await fs.writeFile(path.join(root, "answer.txt"), "visible");
+		const controller = new AbortController();
+		const route = solverRouteFor("lactf-2026-pwn-tic-tac-no");
+		const lateSession = Promise.withResolvers<LocalSolverSession>();
+		let adapterOpened = false;
+		let solved = false;
+		const backend = createLocalCtfSolverBackend({
+			root,
+			artifactRoot,
+			challenges: new Map([
+				[
+					"lactf-2026-pwn-tic-tac-no",
+					makeDescriptor({ id: "lactf-2026-pwn-tic-tac-no", visibleArtifactAllowlist: ["answer.txt"] }),
+				],
+			]),
+			adapterProviders: [
+				{
+					challengeId: route.challengeId,
+					routeDigest: route.routeDigest,
+					adapterKind: "process-service",
+					open: () => {
+						adapterOpened = true;
+						return {
+							service: Promise.resolve({
+								send: async () => {},
+								receive: async () => new Uint8Array(),
+								restart: async () => {},
+								close: async () => {},
+							}),
+							terminate: async () => {},
+						};
+					},
+				},
+			],
+			createSession: () => {
+				controller.abort("cancelled during session creation");
+				return {
+					session: lateSession.promise,
+					terminate: async () =>
+						lateSession.resolve({
+							solve: async () => {
+								solved = true;
+								return { candidate: "unexpected" };
+							},
+						}),
+					quiesced: Promise.resolve(),
+				};
+			},
+		});
+
+		await expect(
+			backend.solve({ ...request("lactf-2026-pwn-tic-tac-no", root), signal: controller.signal }),
+		).resolves.toMatchObject({ status: "cancelled" });
+		expect(adapterOpened).toBe(true);
+		expect(solved).toBe(false);
+	});
+	it("fails closed when a cancelled session lifecycle never produces or quiesces", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));
+		const artifactRoot = path.join(root, "artifacts");
+		await fs.mkdir(artifactRoot);
+		await fs.writeFile(path.join(root, "answer.txt"), "visible");
+		const controller = new AbortController();
+		const backend = createLocalCtfSolverBackend({
+			root,
+			artifactRoot,
+			challenges: new Map([
+				[
+					"lactf-2026-crypto-not-so-lazy-trigrams",
+					makeDescriptor({
+						id: "lactf-2026-crypto-not-so-lazy-trigrams",
+						visibleArtifactAllowlist: ["answer.txt"],
+					}),
+				],
+			]),
+			analyzers: [{ id: "not-so-lazy-trigrams", analyze: () => analyzerLifecycle({ status: "not-applicable" }) }],
+			createSession: () => {
+				controller.abort("cancelled while session creation is pending");
+				return {
+					session: new Promise<never>(() => undefined),
+					terminate: async () => {},
+					quiesced: new Promise<never>(() => undefined),
+				};
+			},
+		});
+
+		await expect(
+			backend.solve({ ...request("lactf-2026-crypto-not-so-lazy-trigrams", root), signal: controller.signal }),
+		).resolves.toMatchObject({ status: "failed", reason: expect.stringMatching(/quiescence/) });
+	});
+	it("fails closed when analyzer lifecycle quiescence hangs or rejects", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));
+		const artifactRoot = path.join(root, "artifacts");
+		await fs.mkdir(artifactRoot);
+		await fs.writeFile(path.join(root, "answer.txt"), "visible");
+		for (const createQuiescence of [
+			() => new Promise<void>(() => undefined),
+			() => Promise.reject(new Error("analyzer quiescence rejected")),
+		]) {
+			let terminated = false;
+			const backend = createLocalCtfSolverBackend({
+				root,
+				artifactRoot,
+				challenges: new Map([
+					[
+						"lactf-2026-misc-endians",
+						makeDescriptor({ id: "lactf-2026-misc-endians", visibleArtifactAllowlist: ["answer.txt"] }),
+					],
+				]),
+				analyzers: [
+					{
+						id: "endians",
+						analyze: () =>
+							analyzerLifecycle(
+								{ status: "candidate", result: { candidate: "candidate" } },
+								createQuiescence(),
+								async () => {
+									terminated = true;
+								},
+							),
+					},
+				],
+				createSession: () => sessionLifecycle({ solve: async () => ({ candidate: "unexpected" }) }),
+			});
+			await expect(backend.solve(request("lactf-2026-misc-endians", root))).resolves.toMatchObject({
+				status: "failed",
+				reason: expect.stringMatching(/analyzer .*quiescence/),
+			});
+			expect(terminated).toBe(true);
+			await expect(fs.access(path.join(artifactRoot, "run-1"))).rejects.toThrow();
+		}
+	});
+	it("terminates and joins an aborted analyzer lifecycle", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));
+		const artifactRoot = path.join(root, "artifacts");
+		await fs.mkdir(artifactRoot);
+		await fs.writeFile(path.join(root, "answer.txt"), "visible");
+		const controller = new AbortController();
+		const quiescence = Promise.withResolvers<void>();
+		let terminated = false;
+		const backend = createLocalCtfSolverBackend({
+			root,
+			artifactRoot,
+			challenges: new Map([
+				[
+					"lactf-2026-misc-endians",
+					makeDescriptor({ id: "lactf-2026-misc-endians", visibleArtifactAllowlist: ["answer.txt"] }),
+				],
+			]),
+			analyzers: [
+				{
+					id: "endians",
+					analyze: () => {
+						queueMicrotask(() => controller.abort("cancelled"));
+						return {
+							result: new Promise<never>(() => undefined),
+							terminate: async () => {
+								terminated = true;
+								quiescence.resolve();
+							},
+							quiesced: quiescence.promise,
+						};
+					},
+				},
+			],
+			createSession: () => sessionLifecycle({ solve: async () => ({ candidate: "unexpected" }) }),
+		});
+		await expect(
+			backend.solve({ ...request("lactf-2026-misc-endians", root), signal: controller.signal }),
+		).resolves.toMatchObject({ status: "cancelled" });
+		expect(terminated).toBe(true);
+	});
+	it("rejects raw analyzer promises", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));
+		const artifactRoot = path.join(root, "artifacts");
+		await fs.mkdir(artifactRoot);
+		await fs.writeFile(path.join(root, "answer.txt"), "visible");
+		const backend = createLocalCtfSolverBackend({
+			root,
+			artifactRoot,
+			challenges: new Map([
+				[
+					"lactf-2026-misc-endians",
+					makeDescriptor({ id: "lactf-2026-misc-endians", visibleArtifactAllowlist: ["answer.txt"] }),
+				],
+			]),
+			analyzers: [
+				{
+					id: "endians",
+					analyze: (() => Promise.reject(new Error("raw analyzer rejection"))) as never,
+				},
+			],
+			createSession: () => sessionLifecycle({ solve: async () => ({ candidate: "unexpected" }) }),
+		});
+		await expect(backend.solve(request("lactf-2026-misc-endians", root))).resolves.toMatchObject({
+			status: "failed",
+			reason: expect.stringMatching(/lifecycle is invalid/),
+		});
+	});
+	it("waits for normal session quiescence before publishing late writer artifacts", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));
+		const artifactRoot = path.join(root, "artifacts");
+		await fs.mkdir(artifactRoot);
+		await fs.writeFile(path.join(root, "answer.txt"), "visible");
+		const quiescence = Promise.withResolvers<void>();
+		const backend = createLocalCtfSolverBackend({
+			root,
+			artifactRoot,
+			challenges: new Map([
+				[
+					"lactf-2026-misc-endians",
+					makeDescriptor({ id: "lactf-2026-misc-endians", visibleArtifactAllowlist: ["answer.txt"] }),
+				],
+			]),
+			analyzers: [{ id: "endians", analyze: () => analyzerLifecycle({ status: "not-applicable" }) }],
+			createSession: () => ({
+				session: Promise.resolve({
+					solve: async input => {
+						queueMicrotask(() => {
+							void input.runCapability
+								.publish("late.txt", new TextEncoder().encode("late"))
+								.then(() => quiescence.resolve());
+						});
+						return { candidate: "candidate" };
+					},
+				}),
+				terminate: async () => {},
+				quiesced: quiescence.promise,
+			}),
+		});
+		await expect(backend.solve(request("lactf-2026-misc-endians", root))).resolves.toMatchObject({
+			status: "candidate",
+			artifacts: expect.arrayContaining(["run-1/late.txt"]),
+		});
+	});
+	it("terminates a session when successful-result quiescence fails", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));
+		const artifactRoot = path.join(root, "artifacts");
+		await fs.mkdir(artifactRoot);
+		await fs.writeFile(path.join(root, "answer.txt"), "visible");
+		let terminated = false;
+		const backend = createLocalCtfSolverBackend({
+			root,
+			artifactRoot,
+			challenges: new Map([
+				[
+					"lactf-2026-misc-endians",
+					makeDescriptor({ id: "lactf-2026-misc-endians", visibleArtifactAllowlist: ["answer.txt"] }),
+				],
+			]),
+			analyzers: [{ id: "endians", analyze: () => analyzerLifecycle({ status: "not-applicable" }) }],
+			createSession: () => ({
+				session: Promise.resolve({ solve: async () => ({ candidate: "candidate" }) }),
+				terminate: async () => {
+					terminated = true;
+				},
+				quiesced: Promise.reject(new Error("session quiescence rejected")),
+			}),
+		});
+		await expect(backend.solve(request("lactf-2026-misc-endians", root))).resolves.toMatchObject({
+			status: "failed",
+			reason: expect.stringMatching(/session quiescence/),
+		});
+		expect(terminated).toBe(true);
+		await expect(fs.access(path.join(artifactRoot, "run-1"))).rejects.toThrow();
+	});
+	it("fails closed when evaluation adapter cleanup does not quiesce", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));
+		const artifactRoot = path.join(root, "artifacts");
+		await fs.mkdir(artifactRoot);
+		await fs.writeFile(path.join(root, "answer.txt"), "visible");
+		const route = solverRouteFor("lactf-2026-pwn-tic-tac-no");
+		const backend = createLocalCtfSolverBackend({
+			root,
+			artifactRoot,
+			challenges: new Map([
+				[
+					"lactf-2026-pwn-tic-tac-no",
+					makeDescriptor({ id: "lactf-2026-pwn-tic-tac-no", visibleArtifactAllowlist: ["answer.txt"] }),
+				],
+			]),
+			adapterProviders: [
+				{
+					challengeId: route.challengeId,
+					routeDigest: route.routeDigest,
+					adapterKind: "process-service",
+					open: () => ({
+						service: Promise.resolve({
+							send: async () => {},
+							receive: async () => new Uint8Array(),
+							restart: async () => {},
+							close: async () => await new Promise<never>(() => undefined),
+						}),
+						terminate: async () => {},
+					}),
+				},
+			],
+			createSession: () => sessionLifecycle({ solve: async () => ({ candidate: "candidate" }) }),
+		});
+
+		await expect(backend.solve(request("lactf-2026-pwn-tic-tac-no", root))).resolves.toMatchObject({
+			status: "failed",
+		});
+	});
 
 	it("fails closed for an unmaterialized or forbidden visible file", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));
 		const descriptor = makeDescriptor({ id: "challenge-1", visibleArtifactAllowlist: ["solve.py"] });
-		const backend = createLocalCtfSolverBackend({
+		const backend = createLocalCtfSolverFixtureBackend({
 			root,
 			artifactRoot: path.join(root, "artifacts"),
 			challenges: new Map([["challenge-1", descriptor]]),
@@ -233,7 +625,7 @@ describe("local GJC solver backend", () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));
 		let invoked = false;
 		const descriptor = makeDescriptor({ id: "challenge-1" });
-		const backend = createLocalCtfSolverBackend({
+		const backend = createLocalCtfSolverFixtureBackend({
 			root,
 			artifactRoot: path.join(root, "artifacts"),
 			challenges: new Map([["challenge-1", descriptor]]),
@@ -268,10 +660,10 @@ describe("local GJC solver backend", () => {
 						makeDescriptor({ id: "lactf-2026-misc-endians", visibleArtifactAllowlist: ["answer.txt"] }),
 					],
 				]),
-				analyzers: [{ id: "endians", analyze: async () => outcome }],
-				createSession: async () => {
+				analyzers: [{ id: "endians", analyze: () => analyzerLifecycle(outcome) }],
+				createSession: () => {
 					invoked = true;
-					return { solve: async () => ({ candidate: "x" }) };
+					return sessionLifecycle({ solve: async () => ({ candidate: "x" }) });
 				},
 			});
 			await expect(backend.solve(request("lactf-2026-misc-endians", root))).resolves.toMatchObject({
@@ -290,7 +682,7 @@ describe("local GJC solver backend", () => {
 			descriptor = makeDescriptor({ id: "challenge-1", visibleArtifactAllowlist: ["answer.txt"] }),
 			result: LocalSolverSessionResult = { candidate: "x" },
 		) =>
-			createLocalCtfSolverBackend({
+			createLocalCtfSolverFixtureBackend({
 				root,
 				artifactRoot,
 				challenges: new Map([["challenge-1", descriptor]]),
@@ -323,7 +715,7 @@ describe("local GJC solver backend", () => {
 		const content = "x".repeat(256 * 1024);
 		for (const name of names) await fs.writeFile(path.join(root, name), content);
 		const descriptor = makeDescriptor({ id: "challenge-1", visibleArtifactAllowlist: names });
-		const backend = createLocalCtfSolverBackend({
+		const backend = createLocalCtfSolverFixtureBackend({
 			root,
 			artifactRoot,
 			challenges: new Map([["challenge-1", descriptor]]),
@@ -337,7 +729,7 @@ describe("local GJC solver backend", () => {
 		await fs.rm(artifactRoot, { recursive: true });
 		await fs.symlink("/tmp", artifactRoot);
 		const one = makeDescriptor({ id: "challenge-1", visibleArtifactAllowlist: [names[0]] });
-		const escaped = createLocalCtfSolverBackend({
+		const escaped = createLocalCtfSolverFixtureBackend({
 			root,
 			artifactRoot,
 			challenges: new Map([["challenge-1", one]]),
@@ -354,7 +746,7 @@ describe("local GJC solver backend", () => {
 		await fs.writeFile(path.join(root, "answer.txt"), "visible");
 		const started = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<LocalSolverSessionResult>();
-		const backend = createLocalCtfSolverBackend({
+		const backend = createLocalCtfSolverFixtureBackend({
 			root,
 			artifactRoot,
 			challenges: new Map([
@@ -391,7 +783,7 @@ describe("local GJC solver backend", () => {
 		await fs.writeFile(path.join(root, "answer.txt"), "visible");
 		const started = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<LocalSolverSessionResult>();
-		const backend = createLocalCtfSolverBackend({
+		const backend = createLocalCtfSolverFixtureBackend({
 			root,
 			artifactRoot,
 			challenges: new Map([
@@ -470,7 +862,7 @@ describe("local GJC solver backend", () => {
 		await fs.writeFile(path.join(root, "answer.txt"), "visible");
 		const started = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<LocalSolverSessionResult>();
-		const backend = createLocalCtfSolverBackend({
+		const backend = createLocalCtfSolverFixtureBackend({
 			root,
 			artifactRoot,
 			challenges: new Map([
@@ -499,7 +891,7 @@ describe("local GJC solver backend", () => {
 			}),
 		).rejects.toThrow("session termination rejected");
 		release.resolve({ candidate: "late" });
-		await expect(run).resolves.toMatchObject({ status: "cancelled" });
+		await expect(run).resolves.toMatchObject({ status: "failed", reason: "session termination rejected" });
 		await Bun.sleep(0);
 		await expect(fs.stat(path.join(artifactRoot, "run-1"))).rejects.toThrow();
 	});
@@ -510,7 +902,7 @@ describe("local GJC solver backend", () => {
 		await fs.writeFile(path.join(root, "answer.txt"), "visible");
 		const started = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<LocalSolverSessionResult>();
-		const backend = createLocalCtfSolverBackend({
+		const backend = createLocalCtfSolverFixtureBackend({
 			root,
 			artifactRoot,
 			challenges: new Map([
@@ -535,9 +927,9 @@ describe("local GJC solver backend", () => {
 				fencingToken: 1,
 				reason: "cancelled",
 			}),
-		).rejects.toThrow(/session acknowledgment/);
+		).rejects.toThrow(/termination timed out/u);
 		release.resolve({ candidate: "late" });
-		await expect(run).resolves.toMatchObject({ status: "cancelled" });
+		await expect(run).resolves.toMatchObject({ status: "failed", reason: expect.stringContaining("timed out") });
 	});
 	it("accepts authoritative session quiescence without awaiting a pending solve promise", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));
@@ -545,7 +937,7 @@ describe("local GJC solver backend", () => {
 		await fs.mkdir(artifactRoot);
 		await fs.writeFile(path.join(root, "answer.txt"), "visible");
 		const started = Promise.withResolvers<void>();
-		const backend = createLocalCtfSolverBackend({
+		const backend = createLocalCtfSolverFixtureBackend({
 			root,
 			artifactRoot,
 			challenges: new Map([
@@ -578,7 +970,7 @@ describe("local GJC solver backend", () => {
 		await fs.mkdir(artifactRoot);
 		await fs.writeFile(path.join(root, "answer.txt"), "visible");
 		const release = Promise.withResolvers<LocalSolverSessionResult>();
-		const backend = createLocalCtfSolverBackend({
+		const backend = createLocalCtfSolverFixtureBackend({
 			root,
 			artifactRoot,
 			challenges: new Map([

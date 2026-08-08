@@ -144,7 +144,7 @@ export function validateLactfVersionStatisticsArtifact(value: unknown): LactfVer
 	if (
 		currentHarnesses.length !== 1 ||
 		!digestsEqual(currentHarnesses[0]!.supersedesObservationDigest, PREVIOUS_ACTIVE_OBSERVATION_DIGEST) ||
-		REVOKED_OBSERVATION_DIGESTS.has(currentHarnesses[0]!.supersedesObservationDigest)
+		REVOKED_OBSERVATION_DIGESTS.has(knownDigest(currentHarnesses[0]!.supersedesObservationDigest))
 	) {
 		throw new Error(
 			"LA CTF observation must contain one current harness that supersedes the prior active observation",

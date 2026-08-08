@@ -9,13 +9,15 @@ import {
 	type EvaluationAdapterContext,
 	type EvaluationAdapterSession,
 	type EvaluationRuntimeAdapter,
+	type OwnedEvaluationOperation,
 	type PublicCapability,
 	type SecretLease,
 	type SecretSink,
 } from "./evaluation";
 
 export type DriverHandle = Readonly<{ destroy(): Promise<void> }>;
-type SecretDriver = Readonly<{ createSecretSink(): Promise<SecretSink> }>;
+export type OwnedDriverOperation<T> = OwnedEvaluationOperation<T>;
+type SecretDriver = Readonly<{ createSecretSink(): OwnedDriverOperation<SecretSink> }>;
 /** Drivers own their sink; the factory injects the opaque lease once before starting and never exposes it to solver code. */
 export type OfflineCheckerDriver = SecretDriver &
 	Readonly<{
@@ -26,7 +28,7 @@ export type OfflineCheckerDriver = SecretDriver &
 				arguments: readonly string[];
 				signal?: AbortSignal;
 			}>,
-		): Promise<DriverHandle>;
+		): OwnedDriverOperation<DriverHandle>;
 	}>;
 export type ProcessServiceDriver = SecretDriver &
 	Readonly<{
@@ -39,17 +41,19 @@ export type ProcessServiceDriver = SecretDriver &
 				arguments: readonly string[];
 				signal?: AbortSignal;
 			}>,
-		): Promise<DriverHandle>;
+		): OwnedDriverOperation<DriverHandle>;
 	}>;
 export type ContainerServiceDriver = SecretDriver &
 	Readonly<{
-		start(request: Readonly<{ imageDigest: string; origin: string; signal?: AbortSignal }>): Promise<DriverHandle>;
+		start(
+			request: Readonly<{ imageDigest: string; origin: string; signal?: AbortSignal }>,
+		): OwnedDriverOperation<DriverHandle>;
 	}>;
 export type BrowserSessionTarget = Readonly<{ origin: string; entryPath: string; downloads: false; rawCdp: false }>;
 export type BrowserSessionDriver = Readonly<{
 	start(
 		request: Readonly<{ browserDigest: string; target: BrowserSessionTarget; signal?: AbortSignal }>,
-	): Promise<DriverHandle>;
+	): OwnedDriverOperation<DriverHandle>;
 }>;
 
 function requireLease(context: EvaluationAdapterContext): SecretLease {
@@ -58,6 +62,11 @@ function requireLease(context: EvaluationAdapterContext): SecretLease {
 }
 function aggregateFailure(message: string, failures: readonly unknown[]): AggregateError {
 	return new AggregateError(failures, message);
+}
+async function revokeSink(sink: SecretSink, state: { revoked: boolean }): Promise<void> {
+	if (state.revoked) return;
+	await sink.revoke();
+	state.revoked = true;
 }
 function session(capability: PublicCapability, handle: DriverHandle, sink?: SecretSink): EvaluationAdapterSession {
 	let destroyed = false;
@@ -83,42 +92,81 @@ function session(capability: PublicCapability, handle: DriverHandle, sink?: Secr
 		},
 	};
 }
-async function inject(
-	context: EvaluationAdapterContext,
-	role: "checker" | "service",
-	driver: SecretDriver,
-): Promise<SecretSink> {
-	const sink = await driver.createSecretSink();
-	try {
-		await deliverSecretLease(requireLease(context), role, sink);
-		return sink;
-	} catch (error) {
-		try {
-			await sink.revoke();
-		} catch (revokeError) {
-			throw aggregateFailure("evaluation secret injection cleanup failed", [error, revokeError]);
-		}
-		throw error;
-	}
-}
-async function startWithSecret(
+function startWithSecret(
 	capability: PublicCapability,
 	context: EvaluationAdapterContext,
 	role: "checker" | "service",
 	driver: SecretDriver,
-	start: () => Promise<DriverHandle>,
-): Promise<EvaluationAdapterSession> {
-	const sink = await inject(context, role, driver);
-	try {
-		return session(capability, await start(), sink);
-	} catch (error) {
+	start: () => OwnedDriverOperation<DriverHandle>,
+): OwnedEvaluationOperation<EvaluationAdapterSession> {
+	const sinkOperation = driver.createSecretSink();
+	let child: OwnedDriverOperation<DriverHandle> | undefined;
+	let sink: SecretSink | undefined;
+	let terminated = false;
+	let sessionReturned = false;
+	const sinkState = { revoked: false };
+	const result = (async () => {
 		try {
-			await sink.revoke();
-		} catch (revokeError) {
-			throw aggregateFailure("evaluation session startup cleanup failed", [error, revokeError]);
+			sink = await sinkOperation.result;
+			if (terminated) throw new Error("evaluation adapter start terminated");
+			await deliverSecretLease(requireLease(context), role, sink);
+			if (terminated) throw new Error("evaluation adapter start terminated");
+			child = start();
+			const handle = await child.result;
+			if (terminated) {
+				await handle.destroy();
+				throw new Error("evaluation adapter start terminated");
+			}
+			sessionReturned = true;
+			return session(capability, handle, sink);
+		} catch (error) {
+			if (sink === undefined) throw error;
+			try {
+				await revokeSink(sink, sinkState);
+			} catch (revokeError) {
+				throw aggregateFailure("evaluation session startup cleanup failed", [error, revokeError]);
+			}
+			throw error;
 		}
-		throw error;
-	}
+	})();
+	return {
+		result,
+		terminate: async reason => {
+			terminated = true;
+			const failures: unknown[] = [];
+			for (const operation of [child, sinkOperation]) {
+				if (operation === undefined) continue;
+				try {
+					await operation.terminate(reason);
+				} catch (error) {
+					failures.push(error);
+				}
+			}
+			if (sink !== undefined && !sessionReturned) {
+				try {
+					await revokeSink(sink, sinkState);
+				} catch (error) {
+					failures.push(error);
+				}
+			}
+			if (failures.length > 0) throw aggregateFailure("evaluation adapter termination failed", failures);
+		},
+		quiesced: (async () => {
+			try {
+				await result;
+			} catch {}
+			const failures: unknown[] = [];
+			for (const operation of [child, sinkOperation]) {
+				if (operation === undefined) continue;
+				try {
+					await operation.quiesced;
+				} catch (error) {
+					failures.push(error);
+				}
+			}
+			if (failures.length > 0) throw aggregateFailure("evaluation adapter quiescence failed", failures);
+		})(),
+	};
 }
 export function createOfflineCheckerAdapter(
 	adapter: OfflineCheckerAdapterV1,
@@ -216,11 +264,15 @@ export function createBrowserSessionAdapter(
 	return {
 		adapterId: adapter.adapterId,
 		roles: adapter.roles,
-		async start(context) {
-			return session(
-				{ kind: "browser", adapterId: adapter.adapterId, ...target },
-				await driver.start({ browserDigest: adapter.browserDigest, target, signal: context.signal }),
-			);
+		start(context) {
+			const operation = driver.start({ browserDigest: adapter.browserDigest, target, signal: context.signal });
+			return {
+				result: operation.result.then(handle =>
+					session({ kind: "browser", adapterId: adapter.adapterId, ...target }, handle),
+				),
+				terminate: reason => operation.terminate(reason),
+				quiesced: operation.quiesced,
+			};
 		},
 	};
 }

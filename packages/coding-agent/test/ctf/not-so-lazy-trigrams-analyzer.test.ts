@@ -129,7 +129,9 @@ describe("not-so-lazy-trigrams candidate analyzer", () => {
 
 	test("is candidate-only and is atomically registered on the reviewed crypto route", async () => {
 		const analyzer = createNotSoLazyTrigramsAnalyzer();
-		const outcome = await analyzer.analyze(input() as never);
+		const lifecycle = analyzer.analyze(input() as never);
+		const outcome = await lifecycle.result;
+		await lifecycle.quiesced;
 		expect(outcome.status).toBe("candidate");
 		const route = solverRouteFor(CHALLENGE);
 		expect(route.analyzerIds).toEqual(["not-so-lazy-trigrams"]);

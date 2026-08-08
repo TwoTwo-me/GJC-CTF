@@ -85,9 +85,13 @@ describe("OOO recurrence analyzer", () => {
 			allowedTools: toolProfile,
 			signal: controller.signal,
 		};
-		const result = await analyzer.analyze(input);
+		const lifecycle = analyzer.analyze(input);
+		const result = await lifecycle.result;
+		await lifecycle.quiesced;
 		expect(result.status).toBe("candidate");
 		controller.abort();
-		expect(await analyzer.analyze(input)).toEqual({ status: "cancelled", reason: "run cancelled" });
+		const cancelledLifecycle = analyzer.analyze(input);
+		expect(await cancelledLifecycle.result).toEqual({ status: "cancelled", reason: "run cancelled" });
+		await cancelledLifecycle.quiesced;
 	});
 });

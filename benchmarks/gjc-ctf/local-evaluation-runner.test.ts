@@ -6,7 +6,12 @@ import { canonicalDigest, sha256Hex } from "../../packages/coding-agent/src/ctf/
 import { evaluationPreflightDigest, evaluationSpecDigest } from "../../packages/coding-agent/src/ctf/contracts/evaluation";
 import { challengeDescriptorDigest } from "../../packages/coding-agent/src/ctf/contracts/manifest";
 import { LACTF_2026_CORPUS_SOURCE, corpusContentDigest } from "../../packages/coding-agent/src/ctf/corpus";
+import type {
+	TrustedOracleExecutor,
+} from "../../packages/coding-agent/src/ctf/runtime/evaluation";
+import type { AnchoredOracleAuthority } from "../../packages/coding-agent/src/ctf/runtime/oracle";
 import { runLocalEvaluation, type LocalEvaluationRunnerRequest } from "./local-evaluation-runner";
+
 
 const digest = (value: string) => sha256Hex(value);
 
@@ -80,11 +85,25 @@ async function fixture(): Promise<{ request: LocalEvaluationRunnerRequest; root:
 			spec,
 			preflight,
 			lineage,
-			adapters: [{ adapterId: "checker", roles: ["checker"], async start() { return { capability: { kind: "checker" as const, adapterId: "checker", available: true as const }, async destroy() {} }; } }],
+			adapters: [{
+				adapterId: "checker",
+				roles: ["checker"],
+				start() {
+					return {
+						result: Promise.resolve({ capability: { kind: "checker" as const, adapterId: "checker", available: true as const }, async destroy() {} }),
+						async terminate() {},
+						quiesced: Promise.resolve(),
+					};
+				},
+			}],
 			async createCandidateCollector(materialized) {
 				expect(await fs.readdir(materialized.root)).toEqual(["chall.txt"]);
 				expect(await fs.readFile(path.join(materialized.root, "chall.txt"), "utf8")).toBe(publicBytes);
-				return async () => ({ encoding: "utf8", value: "candidate" });
+				return () => ({
+					result: Promise.resolve({ encoding: "utf8" as const, value: "candidate" }),
+					async terminate() {},
+					quiesced: Promise.resolve(),
+				});
 			},
 		},
 	};
@@ -128,6 +147,51 @@ describe("verified local evaluation runner", () => {
 			await fs.mkdir(path.join(root, "collision"));
 			const collision = await runLocalEvaluation({ ...request, destinationRoot: path.join(root, "collision") });
 			expect(collision.status).toBe("unavailable");
+		} finally { await fs.rm(root, { recursive: true, force: true }); }
+	});
+
+	test("does not invoke the anchored authority or owned executor for an untrusted checkout", async () => {
+		const { request, root } = await fixture();
+		let executions = 0;
+		const executor: TrustedOracleExecutor = {
+			execute({ identity }) {
+				executions += 1;
+				return {
+					result: Promise.resolve({ registry: {}, result: { identity } }),
+					async terminate() {},
+					quiesced: Promise.resolve(),
+				};
+			},
+		};
+		const oracleAuthority = {
+			verify(_registry: unknown, _result: unknown, identity: Record<string, unknown>) {
+				return {
+					verified: true as const,
+					result: {
+						schemaVersion: "ctf-oracle-result-2" as const,
+						oracleId: "oracle",
+						identity,
+						verdict: "pass" as const,
+						verifierVersion: "test",
+						outputDigest: digest("oracle-output"),
+						sanitizedSummary: "pass" as const,
+						signature: "test-signature",
+					},
+					oracleRegistryDigest: digest("registry"),
+					registrySignerFingerprint: digest("registry-signer"),
+					resultSignerFingerprint: digest("result-signer"),
+				};
+			},
+		} as unknown as AnchoredOracleAuthority;
+		try {
+			const result = await runLocalEvaluation({
+				...request,
+				receiptAuthority: { competitionId: "competition", fencingToken: 1 },
+				oracleAuthority,
+				trustedOracleExecutor: executor,
+			});
+			expect(result.status).toBe("unavailable");
+			expect(executions).toBe(0);
 		} finally { await fs.rm(root, { recursive: true, force: true }); }
 	});
 });

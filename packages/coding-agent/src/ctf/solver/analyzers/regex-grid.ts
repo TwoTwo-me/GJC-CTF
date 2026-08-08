@@ -3,7 +3,7 @@ import { constants as fsConstants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { LocalSolverAnalyzer } from "../local-backend";
+import { createLocalSolverAnalyzerLifecycle, type LocalSolverAnalyzer } from "../local-backend";
 
 const MAX_SOURCE_BYTES = 256 * 1024;
 const MAX_REGEX_CHARS = 64 * 1024;
@@ -606,26 +606,28 @@ export function createRegexGridAnalyzer(
 ): LocalSolverAnalyzer {
 	return {
 		id: "regex-grid-z3",
-		async analyze(input) {
-			if (input.signal.aborted) return { status: "cancelled", reason: "run cancelled" };
-			const visible = input.visibleFiles.find(file => file.path === options.visiblePath);
-			if (visible === undefined) return { status: "not-applicable" };
-			let source: string;
-			try {
-				source = new TextDecoder("utf-8", { fatal: true }).decode(visible.content);
-			} catch {
-				return { status: "refused", reason: "visible source is not valid utf-8" };
-			}
-			const result = await analyzeRegexGridSourceWithZ3(source, { ...options, signal: input.signal });
-			if (result.ok) return { status: "candidate", result: { candidate: result.candidate } };
-			if (
-				result.reason === "missing-length" ||
-				result.reason === "missing-regex" ||
-				result.reason === "no-grid-constraints"
-			)
-				return { status: "not-applicable" };
-			if (result.reason === "cancelled") return { status: "cancelled", reason: result.diagnostics[0] };
-			return { status: "refused", reason: `${result.reason}: ${result.diagnostics[0]}` };
+		analyze(input) {
+			return createLocalSolverAnalyzerLifecycle(input, async ownedInput => {
+				if (ownedInput.signal.aborted) return { status: "cancelled", reason: "run cancelled" };
+				const visible = ownedInput.visibleFiles.find(file => file.path === options.visiblePath);
+				if (visible === undefined) return { status: "not-applicable" };
+				let source: string;
+				try {
+					source = new TextDecoder("utf-8", { fatal: true }).decode(visible.content);
+				} catch {
+					return { status: "refused", reason: "visible source is not valid utf-8" };
+				}
+				const result = await analyzeRegexGridSourceWithZ3(source, { ...options, signal: ownedInput.signal });
+				if (result.ok) return { status: "candidate", result: { candidate: result.candidate } };
+				if (
+					result.reason === "missing-length" ||
+					result.reason === "missing-regex" ||
+					result.reason === "no-grid-constraints"
+				)
+					return { status: "not-applicable" };
+				if (result.reason === "cancelled") return { status: "cancelled", reason: result.diagnostics[0] };
+				return { status: "refused", reason: `${result.reason}: ${result.diagnostics[0]}` };
+			});
 		},
 	};
 }

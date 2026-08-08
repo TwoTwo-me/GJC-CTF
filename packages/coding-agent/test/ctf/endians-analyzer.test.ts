@@ -29,7 +29,7 @@ describe("Endians analyzer", () => {
 		const analyzer = createEndiansAnalyzer({ visiblePath: "chall.txt" });
 		const route = solverRouteFor("lactf-2026-misc-endians");
 		const toolProfile: readonly string[] = [];
-		const result = await analyzer.analyze({
+		const lifecycle = analyzer.analyze({
 			challengeId: route.challengeId,
 			runId: "run-1",
 			routeDigest: route.routeDigest,
@@ -51,6 +51,8 @@ describe("Endians analyzer", () => {
 			allowedTools: toolProfile,
 			signal: new AbortController().signal,
 		});
+		const result = await lifecycle.result;
+		await lifecycle.quiesced;
 		expect(result.status).toBe("candidate");
 	});
 });
