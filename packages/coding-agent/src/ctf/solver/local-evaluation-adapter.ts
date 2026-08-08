@@ -3,6 +3,7 @@ import type { SolverAttemptLimits, SolverRoute } from "./router";
 const MAX_ACTIONS = 64;
 const MAX_ACTION_BYTES = 64 * 1024;
 const MAX_TOTAL_BYTES = 256 * 1024;
+const CLEANUP_TIMEOUT_MS = 250;
 
 type InteractiveAdapterKind = Exclude<SolverRoute["adapterKind"], "offline-checker">;
 
@@ -10,6 +11,18 @@ type AdapterIdentity = Readonly<{
 	challengeId: string;
 	routeDigest: string;
 	adapterKind: InteractiveAdapterKind;
+}>;
+
+export type LocalEvaluationRunBinding = Readonly<{
+	competitionId: string;
+	runId: string;
+	challengeId: string;
+	fencingToken: number;
+}>;
+export type LocalEvaluationAdapterLifecycle = { close(): Promise<void> };
+export type LocalEvaluationAcquisition = Readonly<{
+	service: Promise<LocalProcessService | LocalBrowserSession>;
+	terminate(): Promise<void>;
 }>;
 
 export type LocalBrowserAction =
@@ -28,14 +41,32 @@ export type LocalProcessService = Readonly<{
 export type LocalBrowserSession = Readonly<{
 	action(action: LocalBrowserAction): Promise<void>;
 	close(): Promise<void>;
+	/**
+	 * The provider creates a fresh context with this origin and intercepts every
+	 * request type (including redirects, popups, websockets, and subresources).
+	 */
+	networkAuthority: Readonly<{
+		origin: string;
+		intercepts: Readonly<{
+			navigation: true;
+			redirect: true;
+			popup: true;
+			websocket: true;
+			subresource: true;
+		}>;
+	}>;
 	observation?: Readonly<{ status?: string; exitCode?: number }>;
 }>;
 
 export type LocalEvaluationAdapterProvider = AdapterIdentity &
 	Readonly<{
 		open(
-			input: Readonly<{ signal: AbortSignal; attemptLimits: SolverAttemptLimits }>,
-		): Promise<LocalProcessService | LocalBrowserSession>;
+			input: Readonly<{
+				signal: AbortSignal;
+				attemptLimits: SolverAttemptLimits;
+				binding: LocalEvaluationRunBinding;
+			}>,
+		): LocalEvaluationAcquisition;
 	}>;
 
 export type LocalEvaluationAdapter =
@@ -52,43 +83,17 @@ export type LocalEvaluationAdapter =
 	| Readonly<{
 			adapterKind: "browser-session";
 			observation?: Readonly<{ status?: string; exitCode?: number }>;
-			browser: Readonly<{
-				action(action: LocalBrowserAction): Promise<void>;
-			}>;
+			browser: Readonly<{ action(action: LocalBrowserAction): Promise<void> }>;
 			close(): Promise<void>;
 	  }>;
+
+const seenServices = new Set<object>();
 
 function isInteractiveKind(value: SolverRoute["adapterKind"]): value is InteractiveAdapterKind {
 	return value === "process-service" || value === "browser-session";
 }
 
-function relativePath(value: string): boolean {
-	if (
-		!value ||
-		value.includes("\0") ||
-		value.includes("\\") ||
-		value.startsWith("/") ||
-		/^[a-z][a-z\d+.-]*:/iu.test(value)
-	)
-		return false;
-	return !value.split(/[?#]/u)[0].split("/").includes("..");
-}
-
-function validBrowserAction(action: LocalBrowserAction): boolean {
-	if (action.type === "navigate") return relativePath(action.path) && action.path.length <= 2048;
-	if (action.type === "click") return action.selector.length > 0 && action.selector.length <= 1024;
-	return action.selector.length > 0 && action.selector.length <= 1024 && action.value.length <= MAX_ACTION_BYTES;
-}
-
-function bounded(
-	limit: SolverAttemptLimits,
-	signal: AbortSignal,
-): {
-	assertAction(bytes?: number): void;
-	chargeBytes(bytes: number): void;
-	remainingMs(): number;
-} {
-	const startedAt = Date.now();
+function bounded(signal: AbortSignal, deadline: number) {
 	let actions = 0;
 	let bytes = 0;
 	return {
@@ -99,8 +104,7 @@ function bounded(
 			if (++actions > MAX_ACTIONS) throw new Error("local evaluation adapter action limit exhausted");
 			bytes += actionBytes;
 			if (bytes > MAX_TOTAL_BYTES) throw new Error("local evaluation adapter byte limit exhausted");
-			if (Date.now() - startedAt >= limit.wallClockMs)
-				throw new Error("local evaluation adapter time limit exhausted");
+			if (Date.now() >= deadline) throw new Error("local evaluation adapter time limit exhausted");
 		},
 		chargeBytes(charge: number): void {
 			if (!Number.isSafeInteger(charge) || charge < 0 || charge > MAX_ACTION_BYTES)
@@ -109,17 +113,42 @@ function bounded(
 			if (bytes > MAX_TOTAL_BYTES) throw new Error("local evaluation adapter byte limit exhausted");
 		},
 		remainingMs(): number {
-			const remaining = limit.wallClockMs - (Date.now() - startedAt);
+			const remaining = deadline - Date.now();
 			if (signal.aborted || remaining <= 0) throw new Error("local evaluation adapter time limit exhausted");
 			return remaining;
 		},
 	};
 }
 
+function raceBounded<T>(promise: Promise<T>, signal: AbortSignal, deadline: number, label: string): Promise<T> {
+	const remaining = deadline - Date.now();
+	if (signal.aborted) return Promise.reject(new Error("local evaluation adapter is cancelled"));
+	if (remaining <= 0) return Promise.reject(new Error("local evaluation adapter time limit exhausted"));
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => finish(new Error("local evaluation adapter time limit exhausted")), remaining);
+		const abort = () => finish(new Error("local evaluation adapter is cancelled"));
+		const finish = (error?: Error, value?: T): void => {
+			clearTimeout(timer);
+			signal.removeEventListener("abort", abort);
+			if (error !== undefined) reject(error);
+			else resolve(value as T);
+		};
+		signal.addEventListener("abort", abort, { once: true });
+		promise.then(
+			value => finish(undefined, value),
+			error => finish(error instanceof Error ? error : new Error(`local evaluation adapter ${label} failed`)),
+		);
+	});
+}
+function cleanupDeadline(): number {
+	return Date.now() + CLEANUP_TIMEOUT_MS;
+}
+
 function closeOnce(close: () => Promise<void>): () => Promise<void> {
 	let closing: Promise<void> | undefined;
 	return () => (closing ??= Promise.resolve().then(close));
 }
+
 function observationOf(
 	observation: LocalProcessService["observation"] | LocalBrowserSession["observation"],
 ): Readonly<{ status?: string; exitCode?: number }> | undefined {
@@ -129,75 +158,109 @@ function observationOf(
 	if (Number.isSafeInteger(observation.exitCode)) result.exitCode = observation.exitCode;
 	return Object.keys(result).length === 0 ? undefined : Object.freeze(result);
 }
-async function openBoundedService(
-	provider: LocalEvaluationAdapterProvider,
-	route: SolverRoute,
-	signal: AbortSignal,
-): Promise<LocalProcessService | LocalBrowserSession> {
-	const controller = new AbortController();
-	const result = Promise.withResolvers<LocalProcessService | LocalBrowserSession>();
-	let settled = false;
-	let timedOut = false;
-	const abort = (): void => {
-		controller.abort(signal.reason);
-		finish(new Error("local evaluation adapter is cancelled"));
-	};
-	const timeout = setTimeout(() => {
-		timedOut = true;
-		controller.abort(new Error("local evaluation adapter time limit exhausted"));
-		finish(new Error("local evaluation adapter time limit exhausted"));
-	}, route.attemptLimits.wallClockMs);
-	const finish = (error?: Error, service?: LocalProcessService | LocalBrowserSession): void => {
-		if (settled) {
-			if (service !== undefined) void closeOnce(() => service.close())().catch(() => undefined);
-			return;
-		}
-		settled = true;
-		clearTimeout(timeout);
-		signal.removeEventListener("abort", abort);
-		if (error === undefined && service !== undefined) result.resolve(service);
-		else result.reject(error ?? new Error("local evaluation adapter open failed"));
-	};
-	if (signal.aborted) abort();
-	else signal.addEventListener("abort", abort, { once: true });
-	if (signal.aborted) finish(new Error("local evaluation adapter is cancelled"));
-	else {
-		Promise.resolve()
-			.then(() => provider.open({ signal: controller.signal, attemptLimits: route.attemptLimits }))
-			.then(
-				service => finish(undefined, service),
-				error =>
-					finish(
-						error instanceof Error
-							? error
-							: new Error(
-									timedOut
-										? "local evaluation adapter time limit exhausted"
-										: "local evaluation adapter open failed",
-								),
-					),
-			);
-	}
-	return result.promise;
-}
 
-/** Opens a route-bound provider and exposes only bounded local interaction methods to AgentSession. */
+/** Opens a route- and run-bound provider and exposes only bounded local interaction methods to AgentSession. */
 export async function openLocalEvaluationAdapter(
 	provider: LocalEvaluationAdapterProvider,
 	route: SolverRoute,
 	signal: AbortSignal,
+	binding: LocalEvaluationRunBinding,
+	lifecycle?: LocalEvaluationAdapterLifecycle,
 ): Promise<LocalEvaluationAdapter> {
 	if (!isInteractiveKind(route.adapterKind)) throw new Error("offline routes do not use local evaluation adapters");
 	if (
 		provider.challengeId !== route.challengeId ||
 		provider.routeDigest !== route.routeDigest ||
-		provider.adapterKind !== route.adapterKind
+		provider.adapterKind !== route.adapterKind ||
+		binding.challengeId !== route.challengeId ||
+		!binding.competitionId ||
+		!binding.runId ||
+		!Number.isSafeInteger(binding.fencingToken)
 	)
-		throw new Error("local evaluation adapter provider does not match the reviewed route");
-	const service = await openBoundedService(provider, route, signal);
-	const close = closeOnce(() => service.close());
-	const limits = bounded(route.attemptLimits, signal);
+		throw new Error("local evaluation adapter provider does not match the reviewed route or run");
+	const deadline = Date.now() + route.attemptLimits.wallClockMs;
+	const controller = new AbortController();
+	const abort = () => controller.abort(signal.reason);
+	if (signal.aborted) abort();
+	else signal.addEventListener("abort", abort, { once: true });
+	let acquisition: LocalEvaluationAcquisition;
 	try {
+		acquisition = provider.open({
+			signal: controller.signal,
+			attemptLimits: route.attemptLimits,
+			binding: Object.freeze({ ...binding }),
+		});
+	} catch {
+		signal.removeEventListener("abort", abort);
+		throw new Error("local evaluation adapter acquisition failed");
+	}
+	if (
+		acquisition === null ||
+		typeof acquisition !== "object" ||
+		typeof acquisition.terminate !== "function" ||
+		acquisition.service === undefined ||
+		typeof acquisition.service.then !== "function"
+	) {
+		signal.removeEventListener("abort", abort);
+		throw new Error("local evaluation adapter acquisition is invalid");
+	}
+	const terminate = closeOnce(async () => {
+		controller.abort(new Error("local evaluation adapter closed"));
+		await raceBounded(
+			Promise.resolve().then(() => acquisition.terminate()),
+			new AbortController().signal,
+			cleanupDeadline(),
+			"acquisition termination",
+		);
+	});
+	if (lifecycle !== undefined) lifecycle.close = terminate;
+	let service: LocalProcessService | LocalBrowserSession;
+	let closeService: (() => Promise<void>) | undefined;
+	try {
+		service = await raceBounded(acquisition.service, controller.signal, deadline, "open");
+		if (seenServices.has(service as object))
+			throw new Error("local evaluation adapter provider reused a quarantined service");
+		seenServices.add(service as object);
+		closeService = closeOnce(async () => {
+			let closeError: unknown;
+			try {
+				await raceBounded(
+					Promise.resolve().then(() => service.close()),
+					new AbortController().signal,
+					cleanupDeadline(),
+					"close",
+				);
+			} catch (error) {
+				closeError = error;
+			}
+			try {
+				await terminate();
+			} catch (error) {
+				if (closeError !== undefined)
+					throw new AggregateError(
+						[closeError, error],
+						"local evaluation adapter close and acquisition termination failed",
+					);
+				throw error;
+			}
+			if (closeError !== undefined) throw closeError;
+			signal.removeEventListener("abort", abort);
+		});
+		const close = closeService;
+		const limits = bounded(controller.signal, deadline);
+		const operation = async <T>(label: string, call: () => Promise<T>): Promise<T> => {
+			try {
+				return await raceBounded(Promise.resolve().then(call), controller.signal, deadline, label);
+			} catch (error) {
+				controller.abort(error);
+				try {
+					await close();
+				} catch (cleanupError) {
+					throw new AggregateError([error, cleanupError], "local evaluation adapter operation and cleanup failed");
+				}
+				throw error;
+			}
+		};
 		if (route.adapterKind === "process-service") {
 			if (!("send" in service) || !("receive" in service) || !("restart" in service))
 				throw new Error("local evaluation adapter provider kind does not match the reviewed route");
@@ -207,14 +270,16 @@ export async function openLocalEvaluationAdapter(
 				process: Object.freeze({
 					async send(content: Uint8Array): Promise<void> {
 						limits.assertAction(content.byteLength);
-						await service.send(new Uint8Array(content));
+						await operation("send", () => (service as LocalProcessService).send(new Uint8Array(content)));
 					},
 					async receive(): Promise<Uint8Array> {
 						limits.assertAction();
-						const content = await service.receive({
-							maxBytes: MAX_ACTION_BYTES,
-							timeoutMs: limits.remainingMs(),
-						});
+						const content = await operation("receive", () =>
+							(service as LocalProcessService).receive({
+								maxBytes: MAX_ACTION_BYTES,
+								timeoutMs: limits.remainingMs(),
+							}),
+						);
 						if (content.byteLength > MAX_ACTION_BYTES)
 							throw new Error("local evaluation adapter receive exceeds byte bound");
 						limits.chargeBytes(content.byteLength);
@@ -222,28 +287,22 @@ export async function openLocalEvaluationAdapter(
 					},
 					async restart(): Promise<void> {
 						limits.assertAction();
-						await service.restart();
+						await operation("restart", () => (service as LocalProcessService).restart());
 					},
 				}),
 				close,
 			});
 		}
-		if (!("action" in service))
-			throw new Error("local evaluation adapter provider kind does not match the reviewed route");
-		return Object.freeze({
-			adapterKind: route.adapterKind,
-			observation: observationOf(service.observation),
-			browser: Object.freeze({
-				async action(action: LocalBrowserAction): Promise<void> {
-					if (!validBrowserAction(action)) throw new Error("browser action is not local or exceeds bounds");
-					limits.assertAction(action.type === "fill" ? Buffer.byteLength(action.value) : 0);
-					await service.action(action);
-				},
-			}),
-			close,
-		});
+		throw new Error("local browser sessions are disabled pending reviewed network enforcement");
 	} catch (error) {
-		await close();
+		controller.abort(error);
+		try {
+			await (closeService ?? terminate)();
+		} catch (terminationError) {
+			throw new AggregateError([error, terminationError], "local evaluation adapter acquisition cleanup failed");
+		} finally {
+			signal.removeEventListener("abort", abort);
+		}
 		throw error;
 	}
 }

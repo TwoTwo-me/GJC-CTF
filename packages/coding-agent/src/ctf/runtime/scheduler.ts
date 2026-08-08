@@ -58,11 +58,21 @@ export type CtfTerminationRequest = Readonly<{
 	reason: "cancelled" | "budget_exhausted";
 }>;
 
+/** Termination identity for work that began only after run authority was acquired. */
+export type CtfRunTerminationRequest = Readonly<{
+	competitionId: string;
+	runId: string;
+	challengeId: string;
+	ownerId: string;
+	fencingToken: number;
+	reason: "cancelled" | "budget_exhausted";
+}>;
+
 export type CtfSolverBackend = Readonly<{
 	id: string;
 	solve(request: CtfSolverRequest): Promise<CtfSolverOutcome>;
 	/** Resolves only after this backend can prove no work for the run can write again. */
-	terminate?(request: CtfTerminationRequest): Promise<void>;
+	terminate?(request: CtfRunTerminationRequest): Promise<void>;
 	/** Cooperative fixture cancellation is never admitted for competition scoring. */
 	termination?: "owned" | "cooperative-fixture";
 }>;
@@ -81,7 +91,7 @@ export type CtfPreparedRun = Readonly<{
 		context?: Readonly<{ signal: AbortSignal }>,
 	): Promise<CtfSolverOutcome | undefined>;
 	/** Resolves only after finalization-owned work can no longer write for this run. */
-	terminate?(request: CtfTerminationRequest): Promise<void>;
+	terminate?(request: CtfRunTerminationRequest): Promise<void>;
 }>;
 
 export type CtfScheduledRun =
@@ -632,6 +642,7 @@ export async function scheduleCtfRuns(request: CtfBatchScheduleRequest): Promise
 					} else if (authority === undefined) {
 						outcome = { status: "blocked", reason: "run authority is unavailable" };
 					} else {
+						assertPositive(authority.fencingToken, "authority fencing token");
 						const materialized =
 							request.materializedFor === undefined
 								? undefined
@@ -657,10 +668,12 @@ export async function scheduleCtfRuns(request: CtfBatchScheduleRequest): Promise
 												signal: signalController.signal,
 											},
 										);
-						const terminationRequest = (): CtfTerminationRequest => ({
+						const terminationRequest = (): CtfRunTerminationRequest => ({
+							competitionId: request.competitionId,
 							runId,
 							challengeId,
 							ownerId: runId,
+							fencingToken: authority.fencingToken,
 							reason:
 								signalController.signal.reason === "run budget exhausted" ? "budget_exhausted" : "cancelled",
 						});
@@ -706,10 +719,12 @@ export async function scheduleCtfRuns(request: CtfBatchScheduleRequest): Promise
 					}
 				}
 				if (preparation !== undefined) {
-					const terminationRequest = (): CtfTerminationRequest => ({
+					const terminationRequest = (): CtfRunTerminationRequest => ({
+						competitionId: request.competitionId,
 						runId,
 						challengeId,
 						ownerId: runId,
+						fencingToken: preparation.authority.fencingToken,
 						reason: signalController.signal.reason === "run budget exhausted" ? "budget_exhausted" : "cancelled",
 					});
 					const cancelled = Promise.withResolvers<void>();

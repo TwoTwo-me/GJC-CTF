@@ -368,6 +368,8 @@ describe("local GJC solver backend", () => {
 			runId: "run-1",
 			challengeId: "challenge-1",
 			ownerId: "run-1",
+			competitionId: "competition-1",
+			fencingToken: 1,
 			reason: "cancelled",
 		});
 		release.resolve({ candidate: "late" });
@@ -403,6 +405,8 @@ describe("local GJC solver backend", () => {
 			runId: traversal.runId,
 			challengeId: "challenge-1",
 			ownerId: traversal.runId,
+			competitionId: "competition-1",
+			fencingToken: 1,
 			reason: "cancelled",
 		});
 		expect(await fs.readFile(path.join(artifactRoot, "historical-run", "candidate.txt"), "utf8")).toBe("retained");
@@ -418,6 +422,28 @@ describe("local GJC solver backend", () => {
 				runId: "run-1",
 				challengeId: "other-challenge",
 				ownerId: "run-1",
+				competitionId: "competition-1",
+				fencingToken: 1,
+				reason: "cancelled",
+			}),
+		).rejects.toThrow(/identity/);
+		await expect(
+			backend.terminate?.({
+				runId: "run-1",
+				challengeId: "challenge-1",
+				ownerId: "run-1",
+				competitionId: "other-competition",
+				fencingToken: 1,
+				reason: "cancelled",
+			}),
+		).rejects.toThrow(/identity/);
+		await expect(
+			backend.terminate?.({
+				runId: "run-1",
+				challengeId: "challenge-1",
+				ownerId: "run-1",
+				competitionId: "competition-1",
+				fencingToken: 2,
 				reason: "cancelled",
 			}),
 		).rejects.toThrow(/identity/);
@@ -425,6 +451,8 @@ describe("local GJC solver backend", () => {
 			runId: "run-1",
 			challengeId: "challenge-1",
 			ownerId: "run-1",
+			competitionId: "competition-1",
+			fencingToken: 1,
 			reason: "cancelled",
 		});
 		await expect(active).resolves.toMatchObject({ status: "cancelled" });
@@ -459,6 +487,8 @@ describe("local GJC solver backend", () => {
 				runId: "run-1",
 				challengeId: "challenge-1",
 				ownerId: "run-1",
+				competitionId: "competition-1",
+				fencingToken: 1,
 				reason: "cancelled",
 			}),
 		).rejects.toThrow("session termination rejected");
@@ -466,6 +496,75 @@ describe("local GJC solver backend", () => {
 		await expect(run).resolves.toMatchObject({ status: "cancelled" });
 		await Bun.sleep(0);
 		await expect(fs.stat(path.join(artifactRoot, "run-1"))).rejects.toThrow();
+	});
+	it("bounds a never-settling session termination acknowledgment", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));
+		const artifactRoot = path.join(root, "artifacts");
+		await fs.mkdir(artifactRoot);
+		await fs.writeFile(path.join(root, "answer.txt"), "visible");
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<LocalSolverSessionResult>();
+		const backend = createLocalCtfSolverBackend({
+			root,
+			artifactRoot,
+			challenges: new Map([
+				["challenge-1", makeDescriptor({ id: "challenge-1", visibleArtifactAllowlist: ["answer.txt"] })],
+			]),
+			createSession: async () => ({
+				solve: async () => {
+					started.resolve();
+					return await release.promise;
+				},
+				terminate: async () => new Promise<never>(() => undefined),
+			}),
+		});
+		const run = backend.solve(request("challenge-1", root));
+		await started.promise;
+		await expect(
+			backend.terminate?.({
+				runId: "run-1",
+				challengeId: "challenge-1",
+				ownerId: "run-1",
+				competitionId: "competition-1",
+				fencingToken: 1,
+				reason: "cancelled",
+			}),
+		).rejects.toThrow(/session acknowledgment/);
+		release.resolve({ candidate: "late" });
+		await expect(run).resolves.toMatchObject({ status: "cancelled" });
+	});
+	it("accepts authoritative session quiescence without awaiting a pending solve promise", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));
+		const artifactRoot = path.join(root, "artifacts");
+		await fs.mkdir(artifactRoot);
+		await fs.writeFile(path.join(root, "answer.txt"), "visible");
+		const started = Promise.withResolvers<void>();
+		const backend = createLocalCtfSolverBackend({
+			root,
+			artifactRoot,
+			challenges: new Map([
+				["challenge-1", makeDescriptor({ id: "challenge-1", visibleArtifactAllowlist: ["answer.txt"] })],
+			]),
+			createSession: async () => ({
+				solve: async () => {
+					started.resolve();
+					return await new Promise<never>(() => undefined);
+				},
+				terminate: async () => undefined,
+			}),
+		});
+		void backend.solve(request("challenge-1", root));
+		await started.promise;
+		await expect(
+			backend.terminate?.({
+				runId: "run-1",
+				challengeId: "challenge-1",
+				ownerId: "run-1",
+				competitionId: "competition-1",
+				fencingToken: 1,
+				reason: "cancelled",
+			}),
+		).resolves.toBeUndefined();
 	});
 	it("composes the owned local backend with a scheduler budget", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));

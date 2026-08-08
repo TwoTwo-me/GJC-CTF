@@ -104,4 +104,32 @@ describe("CTF scheduler integration contract", () => {
 			reason: "backend_invalid_result",
 		});
 	});
+	it("rejects non-positive authority fencing before solver work can start", async () => {
+		let solveCalls = 0;
+		await expect(
+			scheduleCtfRuns({
+				competitionId: "competition-1",
+				challengeIds: ["challenge-1"],
+				mode: "competition",
+				concurrency: 1,
+				backend: {
+					id: "backend-local",
+					solve: async () => {
+						solveCalls += 1;
+						return { status: "candidate" };
+					},
+				},
+				authority: {
+					fencingToken: 0,
+					intentId: "intent-1",
+					skillDigest: "sha256:skill",
+					sandboxPolicyDigest: "sha256:sandbox",
+				},
+				createUnavailable: async () => {
+					throw new Error("backend path expected");
+				},
+			}),
+		).rejects.toThrow(/authority fencing token must be a positive integer/);
+		expect(solveCalls).toBe(0);
+	});
 });

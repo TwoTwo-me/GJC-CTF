@@ -143,6 +143,8 @@ describe("CTF blocked run lifecycle", () => {
 			runId: "solver-run-terminated",
 			challengeId: "challenge-one",
 			ownerId: "solver-run-terminated",
+			competitionId: workspace.manifest.competitionId,
+			fencingToken: prepared.authority.fencingToken,
 			reason: "budget_exhausted" as const,
 		};
 		await Promise.all([prepared.terminate!(request), prepared.terminate!(request)]);

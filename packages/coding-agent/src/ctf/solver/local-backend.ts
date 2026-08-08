@@ -8,13 +8,14 @@ import { canonicalDigest } from "../contracts/digest";
 import type { ChallengeDescriptor } from "../contracts/manifest";
 import type {
 	CtfArtifactEvidence,
+	CtfRunTerminationRequest,
 	CtfSolverBackend,
 	CtfSolverOutcome,
 	CtfSolverRequest,
-	CtfTerminationRequest,
 } from "../runtime/scheduler";
 import {
 	type LocalEvaluationAdapter,
+	type LocalEvaluationAdapterLifecycle,
 	type LocalEvaluationAdapterProvider,
 	matchingLocalEvaluationProviders,
 	openLocalEvaluationAdapter,
@@ -33,6 +34,7 @@ const MAX_FILE_BYTES = 256 * 1024;
 const MAX_VISIBLE_BYTES = 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 64 * 1024;
 const MAX_ARTIFACTS = 8;
+const TERMINATION_TIMEOUT_MS = 250;
 
 export type LocalSolverVisibleFile = Readonly<{ path: string; content: Uint8Array }>;
 export type LocalSolverArtifact = Readonly<{ path: string; content: Uint8Array }>;
@@ -68,7 +70,7 @@ export type LocalSolverSessionResult = Readonly<{
 export type LocalSolverSession = Readonly<{
 	solve(input: LocalSolverSessionInput): Promise<LocalSolverSessionResult>;
 	/** Resolves once session-owned work for the run cannot write again. */
-	terminate?(request: CtfTerminationRequest): Promise<void>;
+	terminate?(request: CtfRunTerminationRequest): Promise<void>;
 }>;
 export type LocalSolverAnalyzerResult =
 	| Readonly<{ status: "not-applicable" }>
@@ -321,13 +323,18 @@ export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOption
 		analyzerById.set(analyzer.id, analyzer);
 	}
 	type ActiveRun = {
+		runId: string;
 		challengeId: string;
 		competitionId: string;
+		ownerId: string;
+		fencingToken: number;
 		artifactPath: string;
 		controller: AbortController;
 		completion: Promise<void>;
 		sessionReady: PromiseWithResolvers<LocalSolverSession | undefined>;
 		session?: LocalSolverSession;
+		evaluationAdapter?: LocalEvaluationAdapter;
+		acquisition?: LocalEvaluationAdapterLifecycle;
 		termination?: Promise<void>;
 	};
 	const runs = new Map<string, ActiveRun>();
@@ -337,33 +344,72 @@ export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOption
 		async terminate(request): Promise<void> {
 			const run = runs.get(request.runId);
 			if (run === undefined) return;
-			if (request.challengeId !== run.challengeId)
+			if (
+				request.competitionId !== run.competitionId ||
+				request.runId !== run.runId ||
+				request.challengeId !== run.challengeId ||
+				request.ownerId !== run.ownerId ||
+				request.fencingToken !== run.fencingToken
+			)
 				throw new Error("termination identity does not match the active run");
 			if (run.termination === undefined) {
 				run.controller.abort(request.reason);
 				run.termination = (async () => {
-					const session = await Promise.race([run.sessionReady.promise, run.completion.then(() => undefined)]);
-					const sessionTermination = await Promise.allSettled([
-						Promise.resolve().then(() => session?.terminate?.(request)),
+					const acquisition = await Promise.allSettled([
+						Promise.resolve().then(() => run.acquisition?.close()),
+						Promise.resolve().then(() => run.evaluationAdapter?.close()),
 					]);
-					const cleanup = (async () => {
-						await run.completion;
-						const residual = await fs.lstat(run.artifactPath).catch(error => {
-							if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-							throw error;
-						});
-						if (residual !== undefined) throw new Error("terminated run retained artifact output");
-					})().finally(() => {
-						if (runs.get(request.runId) === run) runs.delete(request.runId);
-					});
-					const rejected = sessionTermination.find(
+					const acquisitionFailure = acquisition.find(
 						(acknowledgment): acknowledgment is PromiseRejectedResult => acknowledgment.status === "rejected",
 					);
-					if (rejected !== undefined) {
-						void cleanup.catch(() => undefined);
-						throw rejected.reason;
+					if (acquisitionFailure !== undefined) {
+						void run.completion.catch(() => undefined);
+						throw acquisitionFailure.reason;
 					}
-					await cleanup;
+					const readiness = await Promise.race([
+						run.sessionReady.promise.then(session => ({ kind: "session" as const, session })),
+						run.completion.then(() => ({ kind: "complete" as const })),
+						new Promise<Readonly<{ kind: "timeout" }>>(resolve =>
+							setTimeout(() => resolve({ kind: "timeout" }), TERMINATION_TIMEOUT_MS),
+						),
+					]);
+					if (readiness.kind === "timeout") {
+						void run.sessionReady.promise.then(late => late?.terminate?.(request)).catch(() => undefined);
+						throw new Error("termination timed out waiting for session readiness");
+					}
+					const session = readiness.kind === "session" ? readiness.session : undefined;
+					let sessionAcknowledged = false;
+					const terminateSession = session?.terminate;
+					if (terminateSession !== undefined) {
+						const sessionTermination = await Promise.race([
+							Promise.resolve()
+								.then(() => terminateSession(request))
+								.then(
+									() => ({ kind: "acknowledged" as const }),
+									error => ({ kind: "rejected" as const, error }),
+								),
+							new Promise<Readonly<{ kind: "timeout" }>>(resolve =>
+								setTimeout(() => resolve({ kind: "timeout" }), TERMINATION_TIMEOUT_MS),
+							),
+						]);
+						if (sessionTermination.kind === "timeout")
+							throw new Error("termination timed out waiting for session acknowledgment");
+						if (sessionTermination.kind === "rejected") throw sessionTermination.error;
+						sessionAcknowledged = true;
+					}
+					if (!sessionAcknowledged) {
+						const completion = await Promise.race([
+							run.completion.then(() => "complete" as const),
+							new Promise<"timeout">(resolve => setTimeout(() => resolve("timeout"), TERMINATION_TIMEOUT_MS)),
+						]);
+						if (completion === "timeout") throw new Error("termination timed out waiting for run completion");
+					}
+					const residual = await fs.lstat(run.artifactPath).catch(error => {
+						if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+						throw error;
+					});
+					if (residual !== undefined) throw new Error("terminated run retained artifact output");
+					if (runs.get(request.runId) === run) runs.delete(request.runId);
 				})();
 			}
 			await run.termination;
@@ -382,8 +428,11 @@ export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOption
 			const completion = Promise.withResolvers<void>();
 			const sessionReady = Promise.withResolvers<LocalSolverSession | undefined>();
 			const run: ActiveRun = {
+				runId: request.runId,
 				challengeId: request.challengeId,
 				competitionId: request.authority.competitionId,
+				ownerId: request.runId,
+				fencingToken: request.authority.fencingToken,
 				artifactPath,
 				controller,
 				completion: completion.promise,
@@ -496,12 +545,27 @@ export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOption
 							};
 						let evaluationAdapter: LocalEvaluationAdapter | undefined;
 						try {
-							if (matchingProviders.length === 1)
+							if (matchingProviders.length === 1) {
+								const acquisition: LocalEvaluationAdapterLifecycle = {
+									close: async () => {
+										controller.abort(new Error("local evaluation adapter closed before acquisition"));
+									},
+								};
+								run.acquisition = acquisition;
 								evaluationAdapter = await openLocalEvaluationAdapter(
 									matchingProviders[0]!,
 									route,
 									controller.signal,
+									Object.freeze({
+										competitionId: request.authority.competitionId,
+										runId: request.runId,
+										challengeId: request.challengeId,
+										fencingToken: request.authority.fencingToken,
+									}),
+									acquisition,
 								);
+								run.evaluationAdapter = evaluationAdapter;
+							}
 							run.session = await options.createSession(request);
 							run.sessionReady.resolve(run.session);
 							result = await run.session.solve(

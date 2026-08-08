@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { CtfError } from "../../src/ctf/contracts/errors";
 import {
 	type CtfRunAuthority,
+	type CtfRunTerminationRequest,
 	type CtfSolverBackend,
 	type CtfSolverOutcome,
 	scheduleCtfRuns,
@@ -204,13 +205,17 @@ describe("bounded CTF scheduler", () => {
 		const acknowledge = Promise.withResolvers<void>();
 		const lateResult = Promise.withResolvers<CtfSolverOutcome>();
 		let terminal = false;
+		let terminationRequest: CtfRunTerminationRequest | undefined;
 		const backend: CtfSolverBackend = {
 			id: "owned-backend",
 			solve: async () => {
 				started.resolve();
 				return await lateResult.promise;
 			},
-			terminate: async () => await acknowledge.promise,
+			terminate: async request => {
+				terminationRequest = request;
+				await acknowledge.promise;
+			},
 		};
 		const result = scheduleCtfRuns({
 			competitionId: "competition-1",
@@ -231,6 +236,13 @@ describe("bounded CTF scheduler", () => {
 		lateResult.resolve({ status: "candidate", artifacts: ["late.txt"] });
 		expect(terminal).toBe(false);
 		acknowledge.resolve();
+		expect(terminationRequest).toMatchObject({
+			competitionId: "competition-1",
+			challengeId: "alpha",
+			fencingToken: authority.fencingToken,
+			reason: "budget_exhausted",
+		});
+		expect(terminationRequest?.ownerId).toBe(terminationRequest?.runId);
 		await expect(result).resolves.toMatchObject({
 			results: [{ status: "cancelled" }],
 		});
@@ -242,6 +254,7 @@ describe("bounded CTF scheduler", () => {
 		const lateFinalization = Promise.withResolvers<CtfSolverOutcome | undefined>();
 		const lateArtifacts: string[] = [];
 		let terminal = false;
+		let terminationRequest: CtfRunTerminationRequest | undefined;
 		const result = scheduleCtfRuns({
 			competitionId: "competition-1",
 			challengeIds: ["alpha"],
@@ -263,7 +276,10 @@ describe("bounded CTF scheduler", () => {
 					lateArtifacts.push("late.txt");
 					return outcome;
 				},
-				terminate: async () => await acknowledge.promise,
+				terminate: async request => {
+					terminationRequest = request;
+					await acknowledge.promise;
+				},
 			}),
 			terminatePreparation: async () => {},
 			createUnavailable: unavailable,
@@ -278,6 +294,13 @@ describe("bounded CTF scheduler", () => {
 		lateFinalization.resolve({ status: "candidate", artifacts: ["late.txt"] });
 		expect(lateArtifacts).toEqual([]);
 		acknowledge.resolve();
+		expect(terminationRequest).toMatchObject({
+			competitionId: "competition-1",
+			challengeId: "alpha",
+			fencingToken: authority.fencingToken,
+			reason: "cancelled",
+		});
+		expect(terminationRequest?.ownerId).toBe(terminationRequest?.runId);
 		const completed = await result;
 		expect(completed.results[0]).toMatchObject({ status: "cancelled" });
 		expect("artifacts" in completed.results[0]!).toBe(false);
