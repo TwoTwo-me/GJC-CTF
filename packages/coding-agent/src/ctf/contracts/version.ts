@@ -17,6 +17,12 @@ export const CTF_SCHEMA_VERSIONS = {
 	metrics: "ctf-metrics-1",
 	api: "ctf-api-1",
 	skill: "ctf-skill-1",
+	skillOptimizationRound: "ctf-skill-opt-round-2",
+	skillTrainingSelection: "ctf-skill-training-selection-2",
+	skillHoldoutGate: "ctf-skill-holdout-gate-1",
+	skillFailureContinuation: "ctf-skill-failure-continuation-1",
+	skillOptimizationDecision: "ctf-skill-optimization-decision-2",
+	skillOptimizationRoundAudit: "ctf-skill-opt-round-audit-1",
 	safetyMaxima: "ctf-safety-maxima-1",
 	operationalLimits: "ctf-operational-limits-1",
 } as const;

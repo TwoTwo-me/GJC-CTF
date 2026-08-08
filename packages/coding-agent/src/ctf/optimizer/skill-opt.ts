@@ -104,6 +104,7 @@ export type ActiveSkillCandidate = Readonly<{
 export type SkillPromotionStoreOptions = Readonly<{
 	baselineSkillDigest: Digest;
 	trustedEvaluatorKeys: readonly TrustedEvaluatorKey[];
+	roundAuthorityKeys: readonly RoundAuthorityKey[];
 	improvementPolicy: ImprovementPolicy;
 	faultInjection?: Readonly<{
 		afterPrepared?: () => void | Promise<void>;
@@ -118,6 +119,8 @@ const AUDIT_PATH = "skill-opt/audit.jsonl";
 const TRANSACTION_PATH = "skill-opt/transaction.json";
 const LOCK_PATH = "skill-opt/promotion";
 const ZERO: Digest | null = null;
+const FINALIZED_PROMOTION_AUTHORITY = Object.freeze({});
+type FinalizedPromotionAuthority = typeof FINALIZED_PROMOTION_AUTHORITY;
 
 function reject(message: string): never {
 	throw new CtfError("integrity_error", message);
@@ -417,14 +420,24 @@ export class SkillPromotionStore {
 	readonly #baselineSkillDigest: Digest;
 	readonly #faultInjection: SkillPromotionStoreOptions["faultInjection"];
 	readonly #trustedEvaluatorKeys: readonly TrustedEvaluatorKey[];
+	readonly #roundAuthorityKeys: readonly RoundAuthorityKey[];
 	readonly #improvementPolicy: ImprovementPolicy;
 
 	constructor(root: string | RootedStore, options: SkillPromotionStoreOptions) {
 		this.#store = typeof root === "string" ? new RootedStore(root, { durability: "ctf" }) : root;
 		this.#baselineSkillDigest = requireDigest(options.baselineSkillDigest, "baseline skill digest");
 		this.#trustedEvaluatorKeys = [...options.trustedEvaluatorKeys];
+		this.#roundAuthorityKeys = validateRoundAuthorityRegistry(options.roundAuthorityKeys);
 		this.#improvementPolicy = options.improvementPolicy;
 		this.#faultInjection = options.faultInjection;
+	}
+
+	get storageRoot(): string {
+		return this.#store.root;
+	}
+
+	get roundAuthorityKeys(): readonly RoundAuthorityKey[] {
+		return this.#roundAuthorityKeys;
 	}
 
 	async active(): Promise<ActiveSkillCandidate | undefined> {
@@ -481,27 +494,26 @@ export class SkillPromotionStore {
 	}
 
 	async promote(
-		candidateInput: Candidate,
-		candidateReports: readonly unknown[],
-		baselineReports: readonly unknown[],
+		_candidateInput: Candidate,
+		_candidateReports: readonly unknown[],
+		_baselineReports: readonly unknown[],
 	): Promise<AuditReceipt> {
-		return this.#store.withLock(LOCK_PATH, async () => {
-			await this.recover();
-			const candidate = validateSkillCandidate(candidateInput);
-			const evaluation = evaluateSkillCandidate(
-				candidate,
-				candidateReports,
-				baselineReports,
-				this.#improvementPolicy,
-				this.#trustedEvaluatorKeys,
-			);
-			await this.#record(candidate, evaluation);
-			if (evaluation.status !== "eligible") reject("candidate is not eligible for promotion");
-			const active = await this.active();
-			const expectedParent = active?.skillDigest ?? this.#baselineSkillDigest;
-			if (candidate.parentSkillDigest !== expectedParent) reject("candidate parent is stale");
-			return this.#commit("promote", candidate, active?.candidateDigest ?? null);
-		});
+		reject("legacy optimizer-local benchmark reports are diagnostic only and cannot promote a skill");
+	}
+
+	/** Module-confined commit primitive; only a validated sealed round can supply its authority. */
+	async promoteFinalized(candidateInput: Candidate, authority: FinalizedPromotionAuthority): Promise<AuditReceipt> {
+		if (authority !== FINALIZED_PROMOTION_AUTHORITY) reject("skill promotion requires sealed round authority");
+		const candidate = validateSkillCandidate(candidateInput);
+		const active = await this.active();
+		const expectedParent = active?.skillDigest ?? this.#baselineSkillDigest;
+		if (candidate.parentSkillDigest !== expectedParent) reject("candidate parent is stale");
+		await this.#store.writeJsonAtomic(CANDIDATE_PATH(candidate.candidateDigest), candidate, { durability: "ctf" });
+		return this.#commit("promote", candidate, active?.candidateDigest ?? null);
+	}
+
+	get baselineSkillDigest(): Digest {
+		return this.#baselineSkillDigest;
 	}
 
 	async rollback(targetDigest: Digest): Promise<AuditReceipt> {
@@ -649,4 +661,1017 @@ export function makeSkillArtifact(
 		loaderDigest,
 		buildDigest,
 	};
+}
+/**
+ * The round contracts deliberately contain only identities and evidence
+ * digests.  Benchmark observations and candidate artifacts never cross this
+ * boundary.
+ */
+export type SkillBenchmarkIdentityV1 = Readonly<{
+	benchmarkLockDigest: Digest;
+	trainingCorpusDigest: Digest;
+	holdoutCommitmentDigest: Digest;
+	calibrationDigest: Digest;
+	harnessDigest: Digest;
+	toolchainDigest: Digest;
+	modelFingerprint: Digest;
+	backendFingerprint: Digest;
+	policyDigest: Digest;
+	trainingEvaluatorKeyAnchorDigest: Digest;
+	holdoutEvaluatorKeyAnchorDigest: Digest;
+}>;
+
+export type SkillOptimizationRoundV1 = Readonly<{
+	schemaVersion: "ctf-skill-opt-round-2";
+	roundDigest: Digest;
+	incumbentSkillDigest: Digest;
+	committedCohortDigests: readonly Digest[];
+	benchmark: SkillBenchmarkIdentityV1;
+	authorityRegistryDigest: Digest;
+	maximumContinuationBudget: number;
+	scheduleDigest: Digest;
+	tieBreakDigest: Digest;
+	maximumHoldoutLooks: 1;
+	status: "open" | "closed";
+}>;
+
+export type SkillTrainingSelectionV1 = Readonly<{
+	schemaVersion: "ctf-skill-training-selection-2";
+	selectionDigest: Digest;
+	roundDigest: Digest;
+	selectedCandidateDigest: Digest | null;
+	trainingComparisonEvidenceDigests: readonly Digest[];
+	evaluatorKeyId: string;
+	evaluatorKeyAnchorDigest: Digest;
+	signatureAlgorithm: "ed25519";
+	signature: string;
+}>;
+
+export type SkillHoldoutGateV1 = Readonly<{
+	schemaVersion: "ctf-skill-holdout-gate-1";
+	gateDigest: Digest;
+	roundDigest: Digest;
+	selectionDigest: Digest;
+	selectedCandidateDigest: Digest | null;
+	holdoutCommitmentDigest: Digest;
+	authorizedEvidenceDigests: readonly Digest[];
+	evaluatorKeyId: string;
+	evaluatorKeyAnchorDigest: Digest;
+	signatureAlgorithm: "ed25519";
+	signature: string;
+	status: "passed" | "failed" | "unavailable";
+	looksUsed: 1;
+}>;
+
+export type FailureContinuationV1 = Readonly<{
+	schemaVersion: "ctf-skill-failure-continuation-1";
+	continuationDigest: Digest;
+	roundDigest: Digest;
+	trainingProblemDigest: Digest;
+	trainingEvidenceDigests: readonly Digest[];
+	category: "failed" | "unknown";
+	budget: number;
+	disposition: "continue-training" | "stop";
+	scored: false;
+}>;
+
+export type SkillOptimizationDecisionV1 = Readonly<{
+	schemaVersion: "ctf-skill-optimization-decision-2";
+	decisionDigest: Digest;
+	roundDigest: Digest;
+	gateDigest: Digest | null;
+	status: "promoted" | "rejected" | "unavailable";
+	cohortCount: number;
+	holdoutLooksUsed: 0 | 1;
+}>;
+
+export type RoundAuthorityKey = TrustedEvaluatorKey &
+	Readonly<{
+		role: "training" | "holdout";
+		keyAnchorDigest: Digest;
+	}>;
+
+export type SkillRoundAuditReceiptV1 = Readonly<{
+	schemaVersion: "ctf-skill-opt-round-audit-1";
+	receiptDigest: Digest;
+	roundDigest: Digest;
+	action: "opened" | "selected" | "finalized" | "continued";
+	artifactDigest: Digest;
+	previousReceiptDigest: Digest | null;
+}>;
+
+const ROUND_PATH = (digest: Digest) => `skill-opt/rounds/${digest}.json`;
+const SELECTION_PATH = (roundDigest: Digest) => `skill-opt/selections/${roundDigest}.json`;
+const HOLDOUT_GATE_PATH = (digest: Digest) => `skill-opt/holdout-gates/${digest}.json`;
+const DECISION_PATH = (roundDigest: Digest) => `skill-opt/decisions/${roundDigest}.json`;
+const CONTINUATION_PATH = (digest: Digest) => `skill-opt/continuations/${digest}.json`;
+const ROUND_AUDIT_PATH = "skill-opt/round-audit.jsonl";
+const FINALIZATION_PATH = (roundDigest: Digest) => `skill-opt/finalizations/${roundDigest}.json`;
+const CONTINUATION_STATE_PATH = (roundDigest: Digest) => `skill-opt/continuation-state/${roundDigest}.json`;
+type ContinuationState = Readonly<{
+	used: number;
+	stopped: boolean;
+	appliedDigests: readonly Digest[];
+}>;
+
+export function roundAuthorityKeyAnchorDigest(
+	key: Pick<RoundAuthorityKey, "keyId" | "algorithm" | "publicKey" | "role">,
+): Digest {
+	if (
+		!key.keyId ||
+		key.algorithm !== "ed25519" ||
+		!key.publicKey ||
+		(key.role !== "training" && key.role !== "holdout")
+	)
+		reject("round authority key material is invalid");
+	return canonicalDigest({ keyId: key.keyId, algorithm: key.algorithm, publicKey: key.publicKey, role: key.role });
+}
+
+export function roundAuthorityRegistryDigest(keys: readonly RoundAuthorityKey[]): Digest {
+	return canonicalDigest(
+		[...keys]
+			.map(key => ({
+				keyId: key.keyId,
+				algorithm: key.algorithm,
+				publicKey: key.publicKey,
+				active: key.active,
+				role: key.role,
+				keyAnchorDigest: key.keyAnchorDigest,
+			}))
+			.sort((left, right) => left.keyId.localeCompare(right.keyId)),
+	);
+}
+
+function validateRoundAuthorityRegistry(keys: readonly RoundAuthorityKey[]): readonly RoundAuthorityKey[] {
+	const active = keys.filter(key => key.active);
+	const keyIds = new Set<string>();
+	const publicKeyFingerprints = new Set<string>();
+	const normalized: RoundAuthorityKey[] = [];
+	for (const key of keys) {
+		if (
+			!key.keyId ||
+			keyIds.has(key.keyId) ||
+			key.algorithm !== "ed25519" ||
+			!key.publicKey ||
+			!digestsEqual(key.keyAnchorDigest, roundAuthorityKeyAnchorDigest(key))
+		)
+			reject("round authority registry key is invalid");
+		let publicKeyFingerprint: string;
+		try {
+			const parsed = createPublicKey({ key: Buffer.from(key.publicKey, "base64"), format: "der", type: "spki" });
+			if (parsed.asymmetricKeyType !== "ed25519") reject("round authority registry public key must be Ed25519");
+			publicKeyFingerprint = canonicalDigest(
+				Buffer.from(parsed.export({ format: "der", type: "spki" })).toString("base64"),
+			);
+		} catch (error) {
+			if (error instanceof CtfError) throw error;
+			reject("round authority registry public key is invalid");
+		}
+		if (publicKeyFingerprints.has(publicKeyFingerprint))
+			reject("round authority registry has duplicate public key material");
+		keyIds.add(key.keyId);
+		publicKeyFingerprints.add(publicKeyFingerprint);
+		normalized.push(Object.freeze({ ...key }));
+	}
+	const identities = active.map(key => `${key.role}:${key.keyAnchorDigest}`);
+	if (new Set(identities).size !== identities.length)
+		reject("round authority registry has duplicate active role anchor");
+	return Object.freeze(normalized);
+}
+
+function requireDigestList(value: unknown, label: string, allowEmpty = false): readonly Digest[] {
+	if (!Array.isArray(value) || (!allowEmpty && value.length === 0)) reject(`${label} is invalid`);
+	const digests = value.map((digest, index) => requireDigest(digest, `${label}[${index}]`));
+	if (new Set(digests).size !== digests.length) reject(`${label} contains duplicates`);
+	return Object.freeze(digests);
+}
+function rejectUnknownKeys(value: object, allowed: readonly string[], label: string): void {
+	for (const key of Object.keys(value)) if (!allowed.includes(key)) reject(`${label} contains a forbidden field`);
+}
+
+function validateBenchmarkIdentity(value: unknown): SkillBenchmarkIdentityV1 {
+	if (value === null || typeof value !== "object") reject("benchmark identity is invalid");
+	rejectUnknownKeys(
+		value,
+		[
+			"benchmarkLockDigest",
+			"trainingCorpusDigest",
+			"holdoutCommitmentDigest",
+			"calibrationDigest",
+			"harnessDigest",
+			"toolchainDigest",
+			"modelFingerprint",
+			"backendFingerprint",
+			"policyDigest",
+			"trainingEvaluatorKeyAnchorDigest",
+			"holdoutEvaluatorKeyAnchorDigest",
+		],
+		"benchmark identity",
+	);
+	const identity = value as SkillBenchmarkIdentityV1;
+	for (const [label, digest] of Object.entries(identity)) requireDigest(digest, `benchmark ${label}`);
+	if (digestsEqual(identity.trainingEvaluatorKeyAnchorDigest, identity.holdoutEvaluatorKeyAnchorDigest))
+		reject("training and holdout evaluator anchors must differ");
+	return Object.freeze({ ...identity });
+}
+
+function roundBasis(
+	round: Omit<SkillOptimizationRoundV1, "roundDigest">,
+): Omit<SkillOptimizationRoundV1, "roundDigest" | "status"> {
+	const { status: _status, ...basis } = round;
+	return basis;
+}
+
+export function createSkillOptimizationRound(
+	input: Omit<SkillOptimizationRoundV1, "schemaVersion" | "roundDigest" | "status">,
+): SkillOptimizationRoundV1 {
+	const cohort = requireDigestList(input.committedCohortDigests, "committed cohort");
+	if (cohort.length < 1) reject("committed cohort is empty");
+	const basis = {
+		schemaVersion: "ctf-skill-opt-round-2" as const,
+		incumbentSkillDigest: requireDigest(input.incumbentSkillDigest, "incumbent skill digest"),
+		committedCohortDigests: cohort,
+		benchmark: validateBenchmarkIdentity(input.benchmark),
+		authorityRegistryDigest: requireDigest(input.authorityRegistryDigest, "authority registry digest"),
+		maximumContinuationBudget: input.maximumContinuationBudget,
+		scheduleDigest: requireDigest(input.scheduleDigest, "schedule digest"),
+		tieBreakDigest: requireDigest(input.tieBreakDigest, "tie break digest"),
+		maximumHoldoutLooks: 1 as const,
+		status: "open" as const,
+	};
+	if (!Number.isSafeInteger(basis.maximumContinuationBudget) || basis.maximumContinuationBudget < 0)
+		reject("maximum continuation budget is invalid");
+	return Object.freeze({ ...basis, roundDigest: canonicalDigest(roundBasis(basis)) });
+}
+
+export function validateSkillOptimizationRound(value: unknown): SkillOptimizationRoundV1 {
+	if (value === null || typeof value !== "object") reject("skill optimization round is invalid");
+	const round = value as SkillOptimizationRoundV1;
+	if (round.schemaVersion !== "ctf-skill-opt-round-2" || (round.status !== "open" && round.status !== "closed"))
+		reject("skill optimization round schema is invalid");
+	rejectUnknownKeys(
+		round,
+		[
+			"schemaVersion",
+			"roundDigest",
+			"incumbentSkillDigest",
+			"committedCohortDigests",
+			"benchmark",
+			"authorityRegistryDigest",
+			"maximumContinuationBudget",
+			"scheduleDigest",
+			"tieBreakDigest",
+			"maximumHoldoutLooks",
+			"status",
+		],
+		"skill optimization round",
+	);
+	if (round.maximumHoldoutLooks !== 1) reject("maximum holdout looks must be exactly one");
+	const normalized: Omit<SkillOptimizationRoundV1, "roundDigest"> = {
+		schemaVersion: round.schemaVersion,
+		incumbentSkillDigest: requireDigest(round.incumbentSkillDigest, "incumbent skill digest"),
+		committedCohortDigests: requireDigestList(round.committedCohortDigests, "committed cohort"),
+		benchmark: validateBenchmarkIdentity(round.benchmark),
+		authorityRegistryDigest: requireDigest(round.authorityRegistryDigest, "authority registry digest"),
+		maximumContinuationBudget: round.maximumContinuationBudget,
+		scheduleDigest: requireDigest(round.scheduleDigest, "schedule digest"),
+		tieBreakDigest: requireDigest(round.tieBreakDigest, "tie break digest"),
+		maximumHoldoutLooks: 1,
+		status: round.status,
+	};
+	if (!Number.isSafeInteger(normalized.maximumContinuationBudget) || normalized.maximumContinuationBudget < 0)
+		reject("maximum continuation budget is invalid");
+	if (!digestsEqual(canonicalDigest(roundBasis(normalized)), requireDigest(round.roundDigest, "round digest")))
+		reject("round digest mismatch");
+	return Object.freeze({ ...normalized, roundDigest: round.roundDigest });
+}
+
+export function skillTrainingSelectionSigningPayload(
+	selection: Omit<SkillTrainingSelectionV1, "selectionDigest" | "signature">,
+): unknown {
+	const { signature: _ignored, ...payload } = selection as Omit<SkillTrainingSelectionV1, "selectionDigest">;
+	return payload;
+}
+
+export function selectSkillTrainingCandidate(
+	roundInput: SkillOptimizationRoundV1,
+	selectedCandidateDigest: Digest | null,
+	trainingComparisonEvidenceDigests: readonly Digest[],
+	authority: Pick<
+		SkillTrainingSelectionV1,
+		"evaluatorKeyId" | "evaluatorKeyAnchorDigest" | "signatureAlgorithm" | "signature"
+	>,
+	keys: readonly RoundAuthorityKey[],
+): SkillTrainingSelectionV1 {
+	const round = validateSkillOptimizationRound(roundInput);
+	if (round.status !== "open") reject("round is closed");
+	if (
+		selectedCandidateDigest !== null &&
+		!round.committedCohortDigests.includes(requireDigest(selectedCandidateDigest, "selected candidate digest"))
+	)
+		reject("selected candidate is not committed to the round");
+	const basis = {
+		schemaVersion: "ctf-skill-training-selection-2" as const,
+		roundDigest: round.roundDigest,
+		selectedCandidateDigest,
+		trainingComparisonEvidenceDigests: requireDigestList(
+			trainingComparisonEvidenceDigests,
+			"training comparison evidence",
+		),
+		evaluatorKeyId: authority.evaluatorKeyId,
+		evaluatorKeyAnchorDigest: requireDigest(authority.evaluatorKeyAnchorDigest, "training evaluator key anchor"),
+		signatureAlgorithm: "ed25519" as const,
+		signature: authority.signature,
+	};
+	if (authority.signatureAlgorithm !== "ed25519" || !basis.evaluatorKeyId || !basis.signature)
+		reject("training selection signer is invalid");
+	if (!digestsEqual(basis.evaluatorKeyAnchorDigest, round.benchmark.trainingEvaluatorKeyAnchorDigest))
+		reject("training evaluator anchor mismatch");
+	verifyRoundAuthoritySignature(
+		skillTrainingSelectionSigningPayload(basis),
+		basis.evaluatorKeyId,
+		basis.evaluatorKeyAnchorDigest,
+		basis.signature,
+		"training",
+		keys,
+	);
+	return Object.freeze({ ...basis, selectionDigest: canonicalDigest(basis) });
+}
+
+export function validateSkillTrainingSelection(
+	value: unknown,
+	round: SkillOptimizationRoundV1,
+	keys: readonly RoundAuthorityKey[],
+): SkillTrainingSelectionV1 {
+	if (value === null || typeof value !== "object") reject("training selection is invalid");
+	const selection = value as SkillTrainingSelectionV1;
+	if (selection.schemaVersion !== "ctf-skill-training-selection-2") reject("training selection schema is invalid");
+	rejectUnknownKeys(
+		selection,
+		[
+			"schemaVersion",
+			"selectionDigest",
+			"roundDigest",
+			"selectedCandidateDigest",
+			"trainingComparisonEvidenceDigests",
+			"evaluatorKeyId",
+			"evaluatorKeyAnchorDigest",
+			"signatureAlgorithm",
+			"signature",
+		],
+		"training selection",
+	);
+	if (!digestsEqual(requireDigest(selection.roundDigest, "selection round digest"), round.roundDigest))
+		reject("training selection round mismatch");
+	const rebuilt = selectSkillTrainingCandidate(
+		round,
+		selection.selectedCandidateDigest,
+		selection.trainingComparisonEvidenceDigests,
+		{
+			evaluatorKeyId: selection.evaluatorKeyId,
+			evaluatorKeyAnchorDigest: selection.evaluatorKeyAnchorDigest,
+			signatureAlgorithm: selection.signatureAlgorithm,
+			signature: selection.signature,
+		},
+		keys,
+	);
+	if (!digestsEqual(rebuilt.selectionDigest, requireDigest(selection.selectionDigest, "selection digest")))
+		reject("selection digest mismatch");
+	return Object.freeze({ ...rebuilt, selectionDigest: selection.selectionDigest });
+}
+
+export function skillHoldoutGateSigningPayload(gate: Omit<SkillHoldoutGateV1, "gateDigest" | "signature">): unknown {
+	const { signature: _ignored, ...payload } = gate as Omit<SkillHoldoutGateV1, "gateDigest">;
+	return payload;
+}
+
+function verifyRoundAuthoritySignature(
+	payload: unknown,
+	keyId: string,
+	anchor: Digest,
+	signature: string,
+	role: RoundAuthorityKey["role"],
+	keys: readonly RoundAuthorityKey[],
+): void {
+	const matches = keys.filter(candidate => candidate.keyId === keyId);
+	const key = matches[0];
+	if (
+		matches.length !== 1 ||
+		key === undefined ||
+		!key.active ||
+		key.algorithm !== "ed25519" ||
+		key.role !== role ||
+		!digestsEqual(key.keyAnchorDigest, anchor)
+	)
+		reject("round authority key is not uniquely active for this role");
+	let decoded: Uint8Array;
+	try {
+		decoded = Buffer.from(signature, "base64");
+		if (decoded.length === 0) reject("round authority signature is invalid");
+	} catch {
+		reject("round authority signature is invalid");
+	}
+	try {
+		if (
+			!verify(
+				null,
+				Buffer.from(canonicalJson(payload)),
+				createPublicKey({ key: Buffer.from(key.publicKey, "base64"), format: "der", type: "spki" }),
+				decoded,
+			)
+		)
+			reject("round authority signature verification failed");
+	} catch (error) {
+		if (error instanceof CtfError) throw error;
+		reject("round authority signature verification failed");
+	}
+}
+
+export function createSkillHoldoutGate(
+	input: Omit<SkillHoldoutGateV1, "schemaVersion" | "gateDigest">,
+	keys: readonly RoundAuthorityKey[],
+): SkillHoldoutGateV1 {
+	if (input.looksUsed !== 1 || !["passed", "failed", "unavailable"].includes(input.status))
+		reject("holdout gate status is invalid");
+	const basis = {
+		schemaVersion: "ctf-skill-holdout-gate-1" as const,
+		roundDigest: requireDigest(input.roundDigest, "gate round digest"),
+		selectionDigest: requireDigest(input.selectionDigest, "gate selection digest"),
+		selectedCandidateDigest:
+			input.selectedCandidateDigest === null
+				? null
+				: requireDigest(input.selectedCandidateDigest, "gate candidate digest"),
+		holdoutCommitmentDigest: requireDigest(input.holdoutCommitmentDigest, "holdout commitment digest"),
+		authorizedEvidenceDigests: requireDigestList(input.authorizedEvidenceDigests, "authorized holdout evidence"),
+		evaluatorKeyId: input.evaluatorKeyId,
+		evaluatorKeyAnchorDigest: requireDigest(input.evaluatorKeyAnchorDigest, "evaluator key anchor"),
+		signatureAlgorithm: "ed25519" as const,
+		signature: input.signature,
+		status: input.status,
+		looksUsed: 1 as const,
+	};
+	if (input.signatureAlgorithm !== "ed25519" || !basis.evaluatorKeyId || !basis.signature)
+		reject("holdout gate signer is invalid");
+	verifyRoundAuthoritySignature(
+		skillHoldoutGateSigningPayload(basis),
+		basis.evaluatorKeyId,
+		basis.evaluatorKeyAnchorDigest,
+		basis.signature,
+		"holdout",
+		keys,
+	);
+	return Object.freeze({ ...basis, gateDigest: canonicalDigest(basis) });
+}
+
+export function validateSkillHoldoutGate(value: unknown, keys: readonly RoundAuthorityKey[]): SkillHoldoutGateV1 {
+	if (value === null || typeof value !== "object") reject("holdout gate is invalid");
+	const gate = value as SkillHoldoutGateV1;
+	if (gate.schemaVersion !== "ctf-skill-holdout-gate-1") reject("holdout gate schema is invalid");
+	rejectUnknownKeys(
+		gate,
+		[
+			"schemaVersion",
+			"gateDigest",
+			"roundDigest",
+			"selectionDigest",
+			"selectedCandidateDigest",
+			"holdoutCommitmentDigest",
+			"authorizedEvidenceDigests",
+			"evaluatorKeyId",
+			"evaluatorKeyAnchorDigest",
+			"signatureAlgorithm",
+			"signature",
+			"status",
+			"looksUsed",
+		],
+		"holdout gate",
+	);
+	const rebuilt = createSkillHoldoutGate(
+		{
+			roundDigest: gate.roundDigest,
+			selectionDigest: gate.selectionDigest,
+			selectedCandidateDigest: gate.selectedCandidateDigest,
+			holdoutCommitmentDigest: gate.holdoutCommitmentDigest,
+			authorizedEvidenceDigests: gate.authorizedEvidenceDigests,
+			evaluatorKeyId: gate.evaluatorKeyId,
+			evaluatorKeyAnchorDigest: gate.evaluatorKeyAnchorDigest,
+			signatureAlgorithm: gate.signatureAlgorithm,
+			signature: gate.signature,
+			status: gate.status,
+			looksUsed: gate.looksUsed,
+		},
+		keys,
+	);
+	if (!digestsEqual(rebuilt.gateDigest, requireDigest(gate.gateDigest, "gate digest")))
+		reject("holdout gate digest mismatch");
+	return Object.freeze({ ...rebuilt, gateDigest: gate.gateDigest });
+}
+
+export function createFailureContinuation(
+	input: Omit<FailureContinuationV1, "schemaVersion" | "continuationDigest" | "scored">,
+): FailureContinuationV1 {
+	if (
+		!["failed", "unknown"].includes(input.category) ||
+		!["continue-training", "stop"].includes(input.disposition) ||
+		!Number.isSafeInteger(input.budget) ||
+		input.budget < 0 ||
+		(input.disposition === "continue-training" && input.budget === 0)
+	)
+		reject("failure continuation is invalid");
+	const basis = {
+		schemaVersion: "ctf-skill-failure-continuation-1" as const,
+		roundDigest: requireDigest(input.roundDigest, "continuation round digest"),
+		trainingProblemDigest: requireDigest(input.trainingProblemDigest, "training problem digest"),
+		trainingEvidenceDigests: requireDigestList(input.trainingEvidenceDigests, "training evidence"),
+		category: input.category,
+		budget: input.budget,
+		disposition: input.disposition,
+		scored: false as const,
+	};
+	return Object.freeze({ ...basis, continuationDigest: canonicalDigest(basis) });
+}
+
+export function validateFailureContinuation(value: unknown): FailureContinuationV1 {
+	if (value === null || typeof value !== "object") reject("failure continuation is invalid");
+	const continuation = value as FailureContinuationV1;
+	if (continuation.schemaVersion !== "ctf-skill-failure-continuation-1" || continuation.scored !== false)
+		reject("failure continuation schema is invalid");
+	rejectUnknownKeys(
+		continuation,
+		[
+			"schemaVersion",
+			"continuationDigest",
+			"roundDigest",
+			"trainingProblemDigest",
+			"trainingEvidenceDigests",
+			"category",
+			"budget",
+			"disposition",
+			"scored",
+		],
+		"failure continuation",
+	);
+	const rebuilt = createFailureContinuation({
+		roundDigest: continuation.roundDigest,
+		trainingProblemDigest: continuation.trainingProblemDigest,
+		trainingEvidenceDigests: continuation.trainingEvidenceDigests,
+		category: continuation.category,
+		budget: continuation.budget,
+		disposition: continuation.disposition,
+	});
+	if (!digestsEqual(rebuilt.continuationDigest, requireDigest(continuation.continuationDigest, "continuation digest")))
+		reject("failure continuation digest mismatch");
+	return Object.freeze({ ...rebuilt, continuationDigest: continuation.continuationDigest });
+}
+function createSkillOptimizationDecision(
+	input: Omit<SkillOptimizationDecisionV1, "schemaVersion" | "decisionDigest">,
+): SkillOptimizationDecisionV1 {
+	if (
+		!["promoted", "rejected", "unavailable"].includes(input.status) ||
+		!Number.isSafeInteger(input.cohortCount) ||
+		input.cohortCount < 1
+	)
+		reject("skill optimization decision is invalid");
+	const isUnattemptedUnavailable =
+		input.status === "unavailable" && input.holdoutLooksUsed === 0 && input.gateDigest === null;
+	const isSignedGateDecision = input.holdoutLooksUsed === 1 && input.gateDigest !== null;
+	if (!isUnattemptedUnavailable && !isSignedGateDecision) reject("skill optimization decision authority is invalid");
+	if (input.status === "promoted" && !isSignedGateDecision) reject("promotion requires a signed holdout gate");
+	const basis = {
+		schemaVersion: "ctf-skill-optimization-decision-2" as const,
+		roundDigest: requireDigest(input.roundDigest, "decision round digest"),
+		gateDigest: input.gateDigest === null ? null : requireDigest(input.gateDigest, "decision gate digest"),
+		status: input.status,
+		cohortCount: input.cohortCount,
+		holdoutLooksUsed: input.holdoutLooksUsed,
+	};
+	return Object.freeze({ ...basis, decisionDigest: canonicalDigest(basis) });
+}
+
+export function validateSkillOptimizationDecision(value: unknown): SkillOptimizationDecisionV1 {
+	if (value === null || typeof value !== "object") reject("skill optimization decision is invalid");
+	const decision = value as SkillOptimizationDecisionV1;
+	rejectUnknownKeys(
+		decision,
+		["schemaVersion", "decisionDigest", "roundDigest", "gateDigest", "status", "cohortCount", "holdoutLooksUsed"],
+		"skill optimization decision",
+	);
+	if (decision.schemaVersion !== "ctf-skill-optimization-decision-2")
+		reject("skill optimization decision schema is invalid");
+	const rebuilt = createSkillOptimizationDecision({
+		roundDigest: decision.roundDigest,
+		gateDigest: decision.gateDigest,
+		status: decision.status,
+		cohortCount: decision.cohortCount,
+		holdoutLooksUsed: decision.holdoutLooksUsed,
+	});
+	if (!digestsEqual(rebuilt.decisionDigest, requireDigest(decision.decisionDigest, "decision digest")))
+		reject("decision digest mismatch");
+	return Object.freeze({ ...rebuilt, decisionDigest: decision.decisionDigest });
+}
+
+export function serializePublicSkillOptimizationArtifact(
+	value: FailureContinuationV1 | SkillOptimizationDecisionV1 | SkillRoundAuditReceiptV1,
+): string {
+	if (value.schemaVersion === "ctf-skill-failure-continuation-1")
+		return canonicalJson(validateFailureContinuation(value));
+	if (value.schemaVersion === "ctf-skill-optimization-decision-2")
+		return canonicalJson(validateSkillOptimizationDecision(value));
+	if (value.schemaVersion === "ctf-skill-opt-round-audit-1") {
+		rejectUnknownKeys(
+			value,
+			["schemaVersion", "receiptDigest", "roundDigest", "action", "artifactDigest", "previousReceiptDigest"],
+			"round audit receipt",
+		);
+		const receipt = value as SkillRoundAuditReceiptV1;
+		const basis = {
+			schemaVersion: receipt.schemaVersion,
+			roundDigest: requireDigest(receipt.roundDigest, "round audit digest"),
+			action: receipt.action,
+			artifactDigest: requireDigest(receipt.artifactDigest, "round audit artifact digest"),
+			previousReceiptDigest:
+				receipt.previousReceiptDigest === null
+					? null
+					: requireDigest(receipt.previousReceiptDigest, "previous receipt digest"),
+		};
+		if (
+			!["opened", "selected", "finalized", "continued"].includes(basis.action) ||
+			!digestsEqual(canonicalDigest(basis), requireDigest(receipt.receiptDigest, "round audit receipt digest"))
+		)
+			reject("round audit receipt is invalid");
+		return canonicalJson({ ...basis, receiptDigest: receipt.receiptDigest });
+	}
+	reject("public skill optimization artifact is invalid");
+}
+
+export class SkillOptimizationRoundStore {
+	readonly #store: RootedStore;
+	readonly #promotion: SkillPromotionStore;
+
+	constructor(root: string | RootedStore, promotion: SkillPromotionStore) {
+		this.#store = typeof root === "string" ? new RootedStore(root, { durability: "ctf" }) : root;
+		if (this.#store.root !== promotion.storageRoot) reject("round and promotion stores must share one root");
+		this.#promotion = promotion;
+	}
+
+	serializePublicArtifact(
+		value: SkillHoldoutGateV1 | FailureContinuationV1 | SkillOptimizationDecisionV1 | SkillRoundAuditReceiptV1,
+	): string {
+		if (value.schemaVersion !== "ctf-skill-holdout-gate-1") return serializePublicSkillOptimizationArtifact(value);
+		return canonicalJson(validateSkillHoldoutGate(value, this.#promotion.roundAuthorityKeys));
+	}
+
+	async open(roundInput: SkillOptimizationRoundV1): Promise<SkillOptimizationRoundV1> {
+		const round = validateSkillOptimizationRound(roundInput);
+		if (round.status !== "open") reject("only open rounds may be created");
+		if (
+			!digestsEqual(round.authorityRegistryDigest, roundAuthorityRegistryDigest(this.#promotion.roundAuthorityKeys))
+		)
+			reject("round authority registry mismatch");
+		return this.#store.withLock(LOCK_PATH, async () => {
+			await this.roundAudit();
+			const existing = await readJson<SkillOptimizationRoundV1>(this.#store, ROUND_PATH(round.roundDigest));
+			if (existing !== undefined) {
+				const prior = validateSkillOptimizationRound(existing);
+				await this.#ensureAudit(prior.roundDigest, "opened", prior.roundDigest);
+				return prior;
+			}
+			await this.#store.writeJsonAtomic(ROUND_PATH(round.roundDigest), round, { durability: "ctf" });
+			await this.#appendAudit(round.roundDigest, "opened", round.roundDigest);
+			return round;
+		});
+	}
+
+	async select(
+		roundDigest: Digest,
+		selectedCandidateDigest: Digest | null,
+		evidence: readonly Digest[],
+		authority: Pick<
+			SkillTrainingSelectionV1,
+			"evaluatorKeyId" | "evaluatorKeyAnchorDigest" | "signatureAlgorithm" | "signature"
+		>,
+	): Promise<SkillTrainingSelectionV1> {
+		return this.#store.withLock(LOCK_PATH, async () => {
+			await this.roundAudit();
+			const round = await this.#round(roundDigest);
+			const selection = selectSkillTrainingCandidate(
+				round,
+				selectedCandidateDigest,
+				evidence,
+				authority,
+				this.#promotion.roundAuthorityKeys,
+			);
+			const path = SELECTION_PATH(round.roundDigest);
+			const existing = await readJson<SkillTrainingSelectionV1>(this.#store, path);
+			if (existing !== undefined) {
+				const prior = validateSkillTrainingSelection(existing, round, this.#promotion.roundAuthorityKeys);
+				if (!digestsEqual(prior.selectionDigest, selection.selectionDigest))
+					reject("round already has a training selection");
+				await this.#ensureAudit(round.roundDigest, "selected", prior.selectionDigest);
+				return prior;
+			}
+			await this.#store.writeJsonAtomic(path, selection, { durability: "ctf" });
+			await this.#appendAudit(round.roundDigest, "selected", selection.selectionDigest);
+			return selection;
+		});
+	}
+
+	async finalize(gateInput: SkillHoldoutGateV1): Promise<SkillOptimizationDecisionV1> {
+		const claimedRoundDigest = requireDigest(gateInput.roundDigest, "gate round digest");
+		return this.#store.withLock(LOCK_PATH, async () => {
+			await this.roundAudit();
+			await this.#promotion.recover();
+			const round = await this.#round(claimedRoundDigest);
+			const finalization = await readJson<{ gateDigest: Digest }>(this.#store, FINALIZATION_PATH(round.roundDigest));
+			if (round.status !== "open" && finalization === undefined)
+				reject("holdout commitment has already been consumed");
+			const gate = validateSkillHoldoutGate(gateInput, this.#promotion.roundAuthorityKeys);
+			if (
+				finalization !== undefined &&
+				!digestsEqual(requireDigest(finalization.gateDigest, "finalization gate digest"), gate.gateDigest)
+			)
+				reject("holdout commitment has already been consumed");
+			const existingDecision = await readJson<SkillOptimizationDecisionV1>(
+				this.#store,
+				DECISION_PATH(round.roundDigest),
+			);
+			if (existingDecision !== undefined) {
+				const decision = validateSkillOptimizationDecision(existingDecision);
+				const expectedStatus =
+					gate.status === "passed" ? "promoted" : gate.status === "failed" ? "rejected" : "unavailable";
+				if (
+					decision.gateDigest !== gate.gateDigest ||
+					decision.status !== expectedStatus ||
+					decision.holdoutLooksUsed !== 1
+				)
+					reject("holdout commitment has already been consumed");
+				if (round.status === "open")
+					await this.#store.writeJsonAtomic(
+						ROUND_PATH(round.roundDigest),
+						Object.freeze({ ...round, status: "closed" as const }),
+						{ durability: "ctf" },
+					);
+				await this.#ensureAudit(round.roundDigest, "finalized", decision.decisionDigest);
+				return decision;
+			}
+			if (round.status !== "open") reject("holdout commitment has already been consumed");
+			if (
+				!digestsEqual(gate.holdoutCommitmentDigest, round.benchmark.holdoutCommitmentDigest) ||
+				!digestsEqual(gate.evaluatorKeyAnchorDigest, round.benchmark.holdoutEvaluatorKeyAnchorDigest)
+			)
+				reject("holdout commitment or evaluator anchor mismatch");
+			const selection = await readJson<SkillTrainingSelectionV1>(this.#store, SELECTION_PATH(round.roundDigest));
+			if (selection === undefined) reject("holdout gate selection is missing");
+			const validSelection = validateSkillTrainingSelection(selection, round, this.#promotion.roundAuthorityKeys);
+			if (
+				validSelection.roundDigest !== round.roundDigest ||
+				validSelection.selectionDigest !== gate.selectionDigest ||
+				validSelection.selectedCandidateDigest !== gate.selectedCandidateDigest
+			)
+				reject("holdout gate selection mismatch");
+			const status = gate.status === "passed" ? "promoted" : gate.status === "failed" ? "rejected" : "unavailable";
+			let promotableCandidate: Candidate | undefined;
+			let alreadyPromoted = false;
+			if (status === "promoted") {
+				if (gate.selectedCandidateDigest === null) reject("a passed gate requires a selected candidate");
+				const candidate = await readJson<Candidate>(this.#store, CANDIDATE_PATH(gate.selectedCandidateDigest));
+				if (candidate === undefined) reject("selected candidate was not recorded");
+				const validCandidate = validateSkillCandidate(candidate);
+				const active = await this.#promotion.active();
+				alreadyPromoted = active?.candidateDigest === validCandidate.candidateDigest;
+				const expectedParent = active?.skillDigest ?? this.#promotion.baselineSkillDigest;
+				if (
+					(!alreadyPromoted && !digestsEqual(validCandidate.parentSkillDigest, expectedParent)) ||
+					!digestsEqual(validCandidate.parentSkillDigest, round.incumbentSkillDigest) ||
+					!digestsEqual(validCandidate.benchmarkLockDigest, round.benchmark.benchmarkLockDigest) ||
+					!digestsEqual(validCandidate.trainingCorpusDigest, round.benchmark.trainingCorpusDigest) ||
+					!digestsEqual(validCandidate.holdoutCommitmentDigest, round.benchmark.holdoutCommitmentDigest)
+				)
+					reject("selected candidate does not match sealed round lineage");
+				promotableCandidate = validCandidate;
+			}
+			await this.#store.writeJsonAtomic(
+				FINALIZATION_PATH(round.roundDigest),
+				{ gateDigest: gate.gateDigest },
+				{ durability: "ctf" },
+			);
+			await this.#store.writeJsonAtomic(HOLDOUT_GATE_PATH(gate.gateDigest), gate, { durability: "ctf" });
+			if (promotableCandidate !== undefined && !alreadyPromoted)
+				await this.#promotion.promoteFinalized(promotableCandidate, FINALIZED_PROMOTION_AUTHORITY);
+			const decision = createSkillOptimizationDecision({
+				roundDigest: round.roundDigest,
+				gateDigest: gate.gateDigest,
+				status,
+				cohortCount: round.committedCohortDigests.length,
+				holdoutLooksUsed: 1,
+			});
+			await this.#store.writeJsonAtomic(HOLDOUT_GATE_PATH(gate.gateDigest), gate, { durability: "ctf" });
+			await this.#store.writeJsonAtomic(DECISION_PATH(round.roundDigest), decision, { durability: "ctf" });
+			await this.#store.writeJsonAtomic(
+				ROUND_PATH(round.roundDigest),
+				Object.freeze({ ...round, status: "closed" as const }),
+				{ durability: "ctf" },
+			);
+			await this.#appendAudit(round.roundDigest, "finalized", decision.decisionDigest);
+			return decision;
+		});
+	}
+
+	async finalizeUnavailable(roundDigest: Digest): Promise<SkillOptimizationDecisionV1> {
+		return this.#store.withLock(LOCK_PATH, async () => {
+			await this.roundAudit();
+			const round = await this.#round(roundDigest);
+			const existing = await readJson<SkillOptimizationDecisionV1>(this.#store, DECISION_PATH(round.roundDigest));
+			if (existing !== undefined) {
+				const decision = validateSkillOptimizationDecision(existing);
+				if (decision.status !== "unavailable" || decision.holdoutLooksUsed !== 0 || decision.gateDigest !== null)
+					reject("holdout commitment has already been consumed");
+				if (round.status === "open")
+					await this.#store.writeJsonAtomic(
+						ROUND_PATH(round.roundDigest),
+						Object.freeze({ ...round, status: "closed" as const }),
+						{ durability: "ctf" },
+					);
+				await this.#ensureAudit(round.roundDigest, "finalized", decision.decisionDigest);
+				return decision;
+			}
+			if (round.status !== "open") reject("holdout commitment has already been consumed");
+			if (
+				this.#promotion.roundAuthorityKeys.some(
+					key =>
+						key.active &&
+						key.role === "holdout" &&
+						digestsEqual(key.keyAnchorDigest, round.benchmark.holdoutEvaluatorKeyAnchorDigest),
+				)
+			)
+				reject("holdout authority is available");
+			const decision = createSkillOptimizationDecision({
+				roundDigest: round.roundDigest,
+				gateDigest: null,
+				status: "unavailable",
+				cohortCount: round.committedCohortDigests.length,
+				holdoutLooksUsed: 0,
+			});
+			await this.#store.writeJsonAtomic(DECISION_PATH(round.roundDigest), decision, { durability: "ctf" });
+			await this.#store.writeJsonAtomic(
+				ROUND_PATH(round.roundDigest),
+				Object.freeze({ ...round, status: "closed" as const }),
+				{ durability: "ctf" },
+			);
+			await this.#appendAudit(round.roundDigest, "finalized", decision.decisionDigest);
+			return decision;
+		});
+	}
+
+	async continueTraining(continuationInput: FailureContinuationV1): Promise<FailureContinuationV1> {
+		const continuation = validateFailureContinuation(continuationInput);
+		return this.#store.withLock(LOCK_PATH, async () => {
+			await this.roundAudit();
+			const round = await this.#round(continuation.roundDigest);
+			if (round.status !== "closed") reject("failure continuation requires a terminal round");
+			const decision = await readJson<SkillOptimizationDecisionV1>(this.#store, DECISION_PATH(round.roundDigest));
+			if (decision === undefined || validateSkillOptimizationDecision(decision).status === "promoted")
+				reject("failure continuation requires a failed or unavailable gate");
+			const state = await this.#continuationState(round);
+			const existing = await readJson<FailureContinuationV1>(
+				this.#store,
+				CONTINUATION_PATH(continuation.continuationDigest),
+			);
+			if (existing !== undefined) {
+				const prior = validateFailureContinuation(existing);
+				if (!digestsEqual(prior.continuationDigest, continuation.continuationDigest))
+					reject("continuation replay mismatch");
+				if (state.appliedDigests.includes(prior.continuationDigest)) {
+					await this.#ensureAudit(round.roundDigest, "continued", prior.continuationDigest);
+					return prior;
+				}
+			}
+			if (state.stopped || state.used + continuation.budget > round.maximumContinuationBudget)
+				reject("continuation budget is exhausted");
+			await this.#store.writeJsonAtomic(CONTINUATION_PATH(continuation.continuationDigest), continuation, {
+				durability: "ctf",
+			});
+			await this.#store.writeJsonAtomic(
+				CONTINUATION_STATE_PATH(round.roundDigest),
+				{
+					used: state.used + continuation.budget,
+					stopped: continuation.disposition === "stop",
+					appliedDigests: [...state.appliedDigests, continuation.continuationDigest],
+				},
+				{ durability: "ctf" },
+			);
+			await this.#appendAudit(round.roundDigest, "continued", continuation.continuationDigest);
+			return continuation;
+		});
+	}
+	async roundAudit(): Promise<readonly SkillRoundAuditReceiptV1[]> {
+		const receipts = await readJsonl<SkillRoundAuditReceiptV1>(this.#store, ROUND_AUDIT_PATH);
+		let previous: Digest | null = null;
+		for (const receipt of receipts) {
+			rejectUnknownKeys(
+				receipt,
+				["schemaVersion", "receiptDigest", "roundDigest", "action", "artifactDigest", "previousReceiptDigest"],
+				"round audit receipt",
+			);
+			const basis = {
+				schemaVersion: receipt.schemaVersion,
+				roundDigest: requireDigest(receipt.roundDigest, "round audit digest"),
+				action: receipt.action,
+				artifactDigest: requireDigest(receipt.artifactDigest, "round audit artifact digest"),
+				previousReceiptDigest:
+					receipt.previousReceiptDigest === null
+						? null
+						: requireDigest(receipt.previousReceiptDigest, "previous receipt digest"),
+			};
+			if (
+				receipt.schemaVersion !== "ctf-skill-opt-round-audit-1" ||
+				!["opened", "selected", "finalized", "continued"].includes(basis.action) ||
+				previous !== basis.previousReceiptDigest ||
+				!digestsEqual(canonicalDigest(basis), requireDigest(receipt.receiptDigest, "round audit receipt digest"))
+			)
+				reject("round audit chain is corrupt");
+			previous = receipt.receiptDigest;
+		}
+		return Object.freeze(receipts);
+	}
+	async #ensureAudit(
+		roundDigest: Digest,
+		action: SkillRoundAuditReceiptV1["action"],
+		artifactDigest: Digest,
+	): Promise<void> {
+		const audit = await this.roundAudit();
+		if (
+			!audit.some(
+				receipt =>
+					receipt.roundDigest === roundDigest &&
+					receipt.action === action &&
+					digestsEqual(receipt.artifactDigest, artifactDigest),
+			)
+		)
+			await this.#appendAudit(roundDigest, action, artifactDigest);
+	}
+
+	async #continuationState(round: SkillOptimizationRoundV1): Promise<ContinuationState> {
+		const value = await readJson<Record<string, unknown>>(this.#store, CONTINUATION_STATE_PATH(round.roundDigest));
+		if (value === undefined) return { used: 0, stopped: false, appliedDigests: [] };
+		rejectUnknownKeys(value, ["used", "stopped", "appliedDigests"], "continuation state");
+		if (
+			!Number.isSafeInteger(value.used) ||
+			typeof value.used !== "number" ||
+			value.used < 0 ||
+			value.used > round.maximumContinuationBudget ||
+			typeof value.stopped !== "boolean"
+		)
+			reject("continuation state is invalid");
+		const appliedDigests = requireDigestList(value.appliedDigests, "applied continuation digests", true);
+		let used = 0;
+		let stopped = false;
+		for (const digest of appliedDigests) {
+			if (stopped) reject("continuation state applies work after stop");
+			const stored = await readJson<FailureContinuationV1>(this.#store, CONTINUATION_PATH(digest));
+			if (stored === undefined) reject("applied continuation is missing");
+			const continuation = validateFailureContinuation(stored);
+			if (!digestsEqual(continuation.roundDigest, round.roundDigest)) reject("applied continuation round mismatch");
+			used += continuation.budget;
+			stopped = continuation.disposition === "stop";
+		}
+		if (used !== value.used || stopped !== value.stopped) reject("continuation state accounting mismatch");
+		return Object.freeze({ used, stopped, appliedDigests });
+	}
+	async #round(digest: Digest): Promise<SkillOptimizationRoundV1> {
+		const round = await readJson<SkillOptimizationRoundV1>(
+			this.#store,
+			ROUND_PATH(requireDigest(digest, "round digest")),
+		);
+		if (round === undefined) reject("skill optimization round is missing");
+		const validated = validateSkillOptimizationRound(round);
+		if (
+			!digestsEqual(
+				validated.authorityRegistryDigest,
+				roundAuthorityRegistryDigest(this.#promotion.roundAuthorityKeys),
+			)
+		)
+			reject("round authority registry mismatch");
+		return validated;
+	}
+
+	async #appendAudit(
+		roundDigest: Digest,
+		action: SkillRoundAuditReceiptV1["action"],
+		artifactDigest: Digest,
+	): Promise<void> {
+		const audit = await this.roundAudit();
+		const basis = {
+			schemaVersion: "ctf-skill-opt-round-audit-1" as const,
+			roundDigest,
+			action,
+			artifactDigest: requireDigest(artifactDigest, "round audit artifact digest"),
+			previousReceiptDigest: audit.at(-1)?.receiptDigest ?? null,
+		};
+		await this.#store.appendJsonl(
+			ROUND_AUDIT_PATH,
+			{ ...basis, receiptDigest: canonicalDigest(basis) },
+			{ durability: "ctf" },
+		);
+	}
 }

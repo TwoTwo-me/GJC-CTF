@@ -13,6 +13,7 @@
 - `gjc-ctf init` now installs and binds its immutable competition-local CTF skill artifact automatically, using descriptor-relative fail-closed native publication instead of a global workflow skill or pathname fallback.
 - CTF bootstrap now binds probes, installers, and elevation to revalidated canonical executable identities from trusted absolute roots, and can seal exact route/tool readiness as an unscored `SolverCapabilityClosureV1`.
 - Local CTF evaluation can now emit a redacted, fresh-instance-bound V2 oracle receipt under external split-key trust anchors and durably attach it to the live run fence as verified evidence pending separate score authority.
+- Replaced optimizer-local aggregate promotion with a digest-sealed blinded round: independently signed training selection, one signed holdout look, explicit zero-look unavailable closure, module-confined promotion authority, replay-safe finalization, and redacted bounded failure continuation.
 
 ### Added
 
