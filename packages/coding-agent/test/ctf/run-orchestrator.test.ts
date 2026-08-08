@@ -2,10 +2,14 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Digest } from "../../src/ctf/contracts/digest";
+import { evaluationLineageDigest, verifiedEvaluationEvidenceDigest } from "../../src/ctf/contracts/evaluation";
+import { oracleResultDigestV2 } from "../../src/ctf/contracts/oracle";
 import { effectiveSkillDigest } from "../../src/ctf/contracts/skill";
 import {
 	createUnavailableRun,
 	prepareCtfSolverRun,
+	recordVerifiedEvaluationEvidence,
 	resumeUnavailableRun,
 } from "../../src/ctf/runtime/run-orchestrator";
 import { loadCtfSkillIdentity } from "../../src/ctf/skills/identity-loader";
@@ -25,6 +29,75 @@ async function tempRoot(): Promise<string> {
 afterEach(async () => {
 	await Promise.all(roots.splice(0).map(root => fs.rm(root, { recursive: true, force: true })));
 });
+const DIGEST_A = "a".repeat(64) as Digest;
+const DIGEST_B = "b".repeat(64) as Digest;
+const DIGEST_C = "c".repeat(64) as Digest;
+
+function anchoredEvidence(input: {
+	competitionId: string;
+	runId: string;
+	challengeId: string;
+	fencingToken: number;
+	evaluationId?: string;
+}) {
+	const identity = {
+		evaluationId: input.evaluationId ?? "evaluation-receipt",
+		competitionId: input.competitionId,
+		runId: input.runId,
+		challengeId: input.challengeId,
+		nonce: "nonce-receipt",
+		candidateDigest: DIGEST_A,
+		inputDigest: DIGEST_B,
+		instanceCommitmentDigest: DIGEST_C,
+	};
+	const oracleResult = {
+		schemaVersion: "ctf-oracle-result-2" as const,
+		oracleId: "oracle-v2",
+		identity,
+		verdict: "pass" as const,
+		verifierVersion: "v2",
+		outputDigest: DIGEST_A,
+		sanitizedSummary: "pass" as const,
+		signature: "synthetic-signature",
+	};
+	const lineageUnsigned = {
+		schemaVersion: "ctf-evaluation-lineage-1" as const,
+		runId: input.runId,
+		challengeId: input.challengeId,
+		descriptorDigest: DIGEST_A,
+		specDigest: DIGEST_A,
+		corpusDigest: DIGEST_A,
+		sourceDigest: DIGEST_A,
+		visiblePolicyDigest: DIGEST_A,
+		toolDigest: DIGEST_A,
+		backendDigest: DIGEST_A,
+		runtimeDigest: DIGEST_A,
+		safetyDigest: DIGEST_A,
+		limitsDigest: DIGEST_A,
+		calibrationDigest: DIGEST_A,
+		preflightDigest: DIGEST_A,
+		candidateDigest: identity.candidateDigest,
+		inputDigest: identity.inputDigest,
+		instanceCommitmentDigest: identity.instanceCommitmentDigest,
+		verifiedOracleDigest: oracleResultDigestV2(oracleResult),
+	};
+	const lineage = { ...lineageUnsigned, lineageDigest: evaluationLineageDigest(lineageUnsigned) };
+	const evidenceUnsigned = {
+		schemaVersion: "ctf-verified-evaluation-evidence-1" as const,
+		kind: "evidence" as const,
+		evaluationId: identity.evaluationId,
+		competitionId: input.competitionId,
+		runId: input.runId,
+		challengeId: input.challengeId,
+		lineage,
+		oracleResult,
+		oracleRegistryDigest: DIGEST_A,
+		registrySignerFingerprint: DIGEST_B,
+		resultSignerFingerprint: DIGEST_C,
+		fencingToken: input.fencingToken,
+	};
+	return { ...evidenceUnsigned, receiptDigest: verifiedEvaluationEvidenceDigest(evidenceUnsigned) };
+}
 
 describe("CTF blocked run lifecycle", () => {
 	it("persists a fenced blocked run and reads it during resume", async () => {
@@ -213,6 +286,106 @@ describe("CTF blocked run lifecycle", () => {
 				now: "2099-01-01T00:00:00.000Z",
 			}),
 		).rejects.toMatchObject({ code: "invalid_transition" });
+	});
+	it("records immutable anchored receipts only under the live run fence and leaves them unscored", async () => {
+		const root = await tempRoot();
+		const effectiveSkill = await loadCtfSkillIdentity({ competitionRoot: root });
+		const initialized = await initCtfWorkspace(root, "test-tool", {
+			skill: {
+				id: effectiveSkill.id,
+				version: effectiveSkill.version,
+				digest: effectiveSkillDigest(effectiveSkill),
+			},
+		});
+		const workspace = await registerChallenge(initialized.workspace, makeDescriptor());
+		const prepared = await prepareCtfSolverRun(workspace, {
+			challengeId: "challenge-one",
+			runId: "receipt-run",
+			mode: "competition",
+			backendId: "backend-local",
+		});
+		const receipt = anchoredEvidence({
+			competitionId: workspace.manifest.competitionId,
+			runId: "receipt-run",
+			challengeId: "challenge-one",
+			fencingToken: prepared.authority.fencingToken,
+		});
+		const request = {
+			runId: "receipt-run",
+			challengeId: "challenge-one",
+			fencingToken: prepared.authority.fencingToken,
+			evidence: receipt,
+		};
+		await expect(
+			recordVerifiedEvaluationEvidence(workspace, {
+				...request,
+				evidence: anchoredEvidence({
+					competitionId: "other-competition",
+					runId: "receipt-run",
+					challengeId: "challenge-one",
+					fencingToken: prepared.authority.fencingToken,
+				}),
+			}),
+		).rejects.toMatchObject({ code: "cross_challenge_reference" });
+		await expect(
+			recordVerifiedEvaluationEvidence(workspace, { ...request, runId: "other-run" }),
+		).rejects.toMatchObject({
+			code: "cross_challenge_reference",
+		});
+		await expect(
+			recordVerifiedEvaluationEvidence(workspace, { ...request, challengeId: "other-challenge" }),
+		).rejects.toMatchObject({ code: "cross_challenge_reference" });
+		await expect(
+			recordVerifiedEvaluationEvidence(workspace, {
+				...request,
+				fencingToken: prepared.authority.fencingToken + 1,
+				evidence: anchoredEvidence({
+					competitionId: workspace.manifest.competitionId,
+					runId: "receipt-run",
+					challengeId: "challenge-one",
+					fencingToken: prepared.authority.fencingToken + 1,
+				}),
+			}),
+		).rejects.toMatchObject({ code: "stale_run_fence" });
+		await expect(
+			recordVerifiedEvaluationEvidence(workspace, {
+				...request,
+				evidence: { ...receipt, receiptDigest: DIGEST_C },
+			}),
+		).rejects.toMatchObject({ code: "digest_mismatch" });
+
+		const blocked = await recordVerifiedEvaluationEvidence(workspace, request);
+		expect(blocked).toMatchObject({ state: "blocked", fencingToken: prepared.authority.fencingToken });
+		const receiptPath = path.join(
+			workspace.stateRoot,
+			"runs",
+			"receipt-run",
+			"evidence",
+			`${receipt.receiptDigest}.json`,
+		);
+		const persisted = await fs.readFile(receiptPath, "utf8");
+		const retried = await recordVerifiedEvaluationEvidence(workspace, request);
+		expect(retried).toEqual(blocked);
+		expect(await fs.readFile(receiptPath, "utf8")).toBe(persisted);
+
+		const events = await new CanonicalEventLog(workspace.stateRoot, {
+			competitionId: workspace.manifest.competitionId,
+			challengeId: "challenge-one",
+		}).read();
+		expect(events.events.map(event => event.eventType)).toEqual([
+			"run_created",
+			"run_started",
+			"run_heartbeat",
+			"run_terminal",
+		]);
+		expect(events.events.at(-1)?.payload).toEqual({
+			mode: "competition",
+			state: "blocked",
+			reason: "verified_evidence_pending_score_authority",
+			fencingToken: prepared.authority.fencingToken,
+		});
+		expect(events.events.at(-1)?.evidenceRefs).toEqual([receipt.receiptDigest]);
+		expect(JSON.stringify(events)).not.toMatch(/solved|passed|scored|denominator/i);
 	});
 	it("rejects stale fencing after an expired lease is taken over", async () => {
 		const root = await tempRoot();

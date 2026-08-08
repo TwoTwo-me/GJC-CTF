@@ -17,9 +17,9 @@ import {
 	evaluateLocalCandidate,
 	type LocalEvaluationRequest,
 	type SecretSink,
-	type TrustedOracleCallback,
+	type TrustedOracleExecutor,
 } from "../../src/ctf/runtime/evaluation";
-import { verifyTrustedOracleResult } from "../../src/ctf/runtime/oracle";
+import { createAnchoredOracleAuthority } from "../../src/ctf/runtime/oracle";
 
 type EvaluationSpecInput = Omit<EvaluationSpecV1, "specDigest">;
 type EvaluationPreflightInput = Omit<EvaluationPreflightV1, "preflightDigest">;
@@ -348,129 +348,249 @@ describe("local evaluation lifecycle", () => {
 		expect(wrongRole).toBe(true);
 		expect(replay).toBe(true);
 	});
-	it("preserves signed verdicts and rejects unsigned/mismatched oracle output", async () => {
-		const { privateKey, publicKey } = generateKeyPairSync("ed25519");
-		const publicKeyText = publicKey.export({ format: "der", type: "spki" }).toString("base64");
-		const key = {
-			keyId: "key-1",
-			algorithm: "ed25519" as const,
-			publicKey: publicKeyText,
-			fingerprint: sha256Hex(publicKeyText),
-			active: true,
+	it("creates durable unscored evidence only from fresh externally anchored V2 receipts", async () => {
+		const registryPrincipal = generateKeyPairSync("ed25519");
+		const resultPrincipal = generateKeyPairSync("ed25519");
+		const key = (keyId: string, publicKey: typeof registryPrincipal.publicKey) => {
+			const publicKeyText = publicKey.export({ format: "der", type: "spki" }).toString("base64");
+			return {
+				keyId,
+				algorithm: "ed25519" as const,
+				publicKey: publicKeyText,
+				fingerprint: sha256Hex(publicKeyText),
+				active: true,
+			};
 		};
+		const registryKey = key("registry-signer", registryPrincipal.publicKey);
+		const resultKey = key("result-signer", resultPrincipal.publicKey);
 		const unsignedEntry = {
 			schemaVersion: "ctf-oracle-entry-1" as const,
-			oracleId: "oracle-1",
-			protocolVersion: "v1",
-			executableRef: "oracle/1",
+			oracleId: "oracle-v2",
+			protocolVersion: "v2",
+			executableRef: "oracle/v2",
 			imageDigest: DIGEST,
 			artifactDigest: DIGEST,
 			allowedChallengeIds: ["challenge-1"],
-			publicKeyId: "key-1",
-			signerKeyId: "key-1",
-			outputSchemaVersion: "ctf-oracle-result-1",
+			publicKeyId: resultKey.keyId,
+			signerKeyId: registryKey.keyId,
+			outputSchemaVersion: "ctf-oracle-result-2",
 		};
 		const entry = {
 			...unsignedEntry,
-			signature: sign(null, Buffer.from(canonicalJson(unsignedEntry)), privateKey).toString("base64"),
+			signature: sign(null, Buffer.from(canonicalJson(unsignedEntry)), registryPrincipal.privateKey).toString(
+				"base64",
+			),
 		};
 		const registry = {
 			schemaVersion: "ctf-oracle-registry-1" as const,
 			entries: [entry],
 			registryDigest: oracleRegistryDigest({ schemaVersion: "ctf-oracle-registry-1", entries: [entry] }),
 		};
-		for (const verdict of ["pass", "fail"] as const) {
-			const requestOracle: TrustedOracleCallback = async identity => {
+		const authority = createAnchoredOracleAuthority(
+			{
+				registrySignerFingerprint: registryKey.fingerprint,
+				resultSignerFingerprint: resultKey.fingerprint,
+			},
+			registry.registryDigest,
+		);
+		const identities: Array<Record<string, unknown>> = [];
+		const executor: TrustedOracleExecutor = {
+			async execute({ identity, candidate }) {
+				identities.push({ ...identity });
+				expect(new TextDecoder().decode(candidate)).toBe("synthetic-candidate");
 				const unsigned = {
-					schemaVersion: "ctf-oracle-result-1" as const,
-					oracleId: "oracle-1",
-					...identity,
-					verdict,
-					verifierVersion: "v1",
+					schemaVersion: "ctf-oracle-result-2" as const,
+					oracleId: entry.oracleId,
+					identity,
+					verdict: "pass" as const,
+					verifierVersion: "v2",
 					outputDigest: DIGEST,
-					sanitizedSummary: verdict,
+					sanitizedSummary: "pass" as const,
 				};
 				return {
-					...unsigned,
-					signature: sign(null, Buffer.from(canonicalJson(unsigned)), privateKey).toString("base64"),
+					registry: { registry, keys: [registryKey, resultKey] },
+					result: {
+						...unsigned,
+						signature: sign(null, Buffer.from(canonicalJson(unsigned)), resultPrincipal.privateKey).toString(
+							"base64",
+						),
+					},
 				};
-			};
-			const base = request(adapter(async () => {}));
-			const evaluation = {
+			},
+		};
+		const evidenceRequest = (evaluationId = "evaluation-1") => {
+			const base = request(
+				adapter(async () => {}),
+				"synthetic-candidate",
+			);
+			const evaluationSpec = { ...base.spec, evaluationId };
+			const specDigest = evaluationSpecDigest(evaluationSpec);
+			return {
 				...base,
-				trustedOracle: { registry, keys: [key] },
-				requestOracle,
+				spec: { ...evaluationSpec, specDigest },
+				lineage: { ...base.lineage, specDigest },
+				receiptAuthority: { competitionId: "competition-1", fencingToken: 7 },
+				oracleAuthority: authority,
+				trustedOracleExecutor: executor,
 			};
-			const result = await evaluateLocalCandidate(evaluation);
-			expect(result.kind).toBe("verified");
-			if (result.kind === "verified") expect(result.verdict).toBe(verdict);
-			const adapterSpec = spec().adapters[0];
-			if (adapterSpec?.kind !== "offline-checker") throw new Error("fixture must provide an offline checker");
-			const teardownRuntime = createOfflineCheckerAdapter(adapterSpec, {
-				async createSecretSink() {
-					return {
-						role: "checker",
-						async writeOnce() {},
-						async revoke() {
-							throw new Error("secret flag /tmp/sink");
-						},
-					};
-				},
-				async prepare() {
-					return { async destroy() {} };
-				},
-			});
-			const teardownResult = await evaluateLocalCandidate({ ...evaluation, adapters: [teardownRuntime] });
-			expect(teardownResult.kind).toBe("unavailable");
-			expect(JSON.stringify(teardownResult)).not.toContain("secret flag");
-			expect(JSON.stringify(teardownResult)).not.toContain("/tmp/sink");
-		}
-		const unsigned = {
-			...request(adapter(async () => {})),
-			trustedOracle: { registry, keys: [key] },
-			requestOracle: async () => ({}),
 		};
-		expect((await evaluateLocalCandidate(unsigned)).kind).toBe("unavailable");
-		const mismatchedEntryUnsigned = { ...unsignedEntry, outputSchemaVersion: "ctf-oracle-result-2" };
-		const mismatchedEntry = {
-			...mismatchedEntryUnsigned,
-			signature: sign(null, Buffer.from(canonicalJson(mismatchedEntryUnsigned)), privateKey).toString("base64"),
-		};
-		const mismatchedRegistry = {
-			schemaVersion: "ctf-oracle-registry-1" as const,
-			entries: [mismatchedEntry],
-			registryDigest: oracleRegistryDigest({
-				schemaVersion: "ctf-oracle-registry-1",
-				entries: [mismatchedEntry],
-			}),
-		};
-		const identity = {
+		const passed = await evaluateLocalCandidate(evidenceRequest());
+		expect(passed.schemaVersion).toBe("ctf-verified-evaluation-evidence-1");
+		expect(passed).toMatchObject({
+			evaluationId: "evaluation-1",
+			competitionId: "competition-1",
 			runId: "run-1",
 			challengeId: "challenge-1",
-			nonce: "nonce-1",
-			candidateDigest: DIGEST,
-			inputDigest: DIGEST,
+			fencingToken: 7,
+			oracleResult: { verdict: "pass", identity: identities[0] },
+		});
+		expect(JSON.stringify(passed)).not.toContain("synthetic-candidate");
+		expect(identities).toHaveLength(1);
+		const failedExecutor: TrustedOracleExecutor = {
+			async execute({ identity }) {
+				const unsigned = {
+					schemaVersion: "ctf-oracle-result-2" as const,
+					oracleId: entry.oracleId,
+					identity,
+					verdict: "fail" as const,
+					verifierVersion: "v2",
+					outputDigest: DIGEST,
+					sanitizedSummary: "fail" as const,
+				};
+				return {
+					registry: { registry, keys: [registryKey, resultKey] },
+					result: {
+						...unsigned,
+						signature: sign(null, Buffer.from(canonicalJson(unsigned)), resultPrincipal.privateKey).toString(
+							"base64",
+						),
+					},
+				};
+			},
 		};
-		const unsignedValidResult = {
-			schemaVersion: "ctf-oracle-result-1" as const,
-			oracleId: "oracle-1",
-			...identity,
-			verdict: "pass" as const,
-			verifierVersion: "v1",
-			outputDigest: DIGEST,
-			sanitizedSummary: "pass",
+		const failed = await evaluateLocalCandidate({ ...evidenceRequest(), trustedOracleExecutor: failedExecutor });
+		expect(failed).toMatchObject({
+			schemaVersion: "ctf-verified-evaluation-evidence-1",
+			oracleResult: { verdict: "fail" },
+		});
+		const otherEvaluation = await evaluateLocalCandidate(evidenceRequest("evaluation-2"));
+		expect(otherEvaluation.schemaVersion).toBe("ctf-verified-evaluation-evidence-1");
+		expect(identities[0]?.instanceCommitmentDigest).not.toBe(identities[1]?.instanceCommitmentDigest);
+
+		const wrongCommitment: TrustedOracleExecutor = {
+			async execute({ identity }) {
+				const unsigned = {
+					schemaVersion: "ctf-oracle-result-2" as const,
+					oracleId: entry.oracleId,
+					identity: { ...identity, instanceCommitmentDigest: DIGEST },
+					verdict: "pass" as const,
+					verifierVersion: "v2",
+					outputDigest: DIGEST,
+					sanitizedSummary: "pass" as const,
+				};
+				return {
+					registry: { registry, keys: [registryKey, resultKey] },
+					result: {
+						...unsigned,
+						signature: sign(null, Buffer.from(canonicalJson(unsigned)), resultPrincipal.privateKey).toString(
+							"base64",
+						),
+					},
+				};
+			},
 		};
-		const validResult = {
-			...unsignedValidResult,
-			signature: sign(null, Buffer.from(canonicalJson(unsignedValidResult)), privateKey).toString("base64"),
+		expect(
+			(await evaluateLocalCandidate({ ...evidenceRequest(), trustedOracleExecutor: wrongCommitment })).kind,
+		).toBe("unavailable");
+		let replay: Parameters<TrustedOracleExecutor["execute"]>[0]["identity"] | undefined;
+		const replayExecutor: TrustedOracleExecutor = {
+			async execute({ identity }) {
+				const replayIdentity = replay ?? identity;
+				replay = replayIdentity;
+				const unsigned = {
+					schemaVersion: "ctf-oracle-result-2" as const,
+					oracleId: entry.oracleId,
+					identity: replayIdentity,
+					verdict: "pass" as const,
+					verifierVersion: "v2",
+					outputDigest: DIGEST,
+					sanitizedSummary: "pass" as const,
+				};
+				return {
+					registry: { registry, keys: [registryKey, resultKey] },
+					result: {
+						...unsigned,
+						signature: sign(null, Buffer.from(canonicalJson(unsigned)), resultPrincipal.privateKey).toString(
+							"base64",
+						),
+					},
+				};
+			},
 		};
-		let rejection: unknown;
-		try {
-			verifyTrustedOracleResult({ registry: mismatchedRegistry, keys: [key] }, validResult, identity);
-		} catch (error) {
-			rejection = error;
-		}
-		expect(rejection).toMatchObject({ code: "oracle_integrity_error" });
+		await evaluateLocalCandidate({ ...evidenceRequest(), trustedOracleExecutor: replayExecutor });
+		expect(
+			(
+				await evaluateLocalCandidate({
+					...evidenceRequest(),
+					lineage: { ...request(adapter(async () => {})).lineage, runId: "run-2" },
+					trustedOracleExecutor: replayExecutor,
+				})
+			).kind,
+		).toBe("unavailable");
+
+		const legacy = {
+			...request(
+				adapter(async () => {}),
+				"synthetic-candidate",
+			),
+			trustedOracle: { registry, keys: [registryKey, resultKey] },
+			requestOracle: async () => ({}),
+		} as LocalEvaluationRequest;
+		expect((await evaluateLocalCandidate(legacy)).kind).toBe("candidate");
+
+		const revocationFailure = await evaluateLocalCandidate({
+			...evidenceRequest(),
+			adapters: [
+				{
+					adapterId: "checker-1",
+					roles: ["checker"],
+					async start(context) {
+						if (context.secretLease === undefined) throw new Error("missing lease");
+						await deliverSecretLease(context.secretLease, "checker", {
+							role: "checker",
+							async writeOnce() {},
+							async revoke() {
+								throw new Error("synthetic revocation failure");
+							},
+						});
+						return {
+							capability: { kind: "checker", adapterId: "checker-1", available: true },
+							async destroy() {},
+						};
+					},
+				},
+			],
+		});
+		expect(revocationFailure.kind).toBe("unavailable");
+		const cleanupFailure = await evaluateLocalCandidate({
+			...evidenceRequest(),
+			adapters: [
+				adapter(async () => {
+					throw new Error("synthetic cleanup failure");
+				}),
+			],
+		});
+		expect(cleanupFailure.kind).toBe("unavailable");
+		const controller = new AbortController();
+		const cancelled = await evaluateLocalCandidate({
+			...evidenceRequest(),
+			collectCandidate: async () => {
+				controller.abort();
+				return { encoding: "utf8", value: "synthetic-candidate" };
+			},
+			signal: controller.signal,
+		});
+		expect(cancelled.kind).toBe("unavailable");
 	});
 });
 describe("browser adapter", () => {

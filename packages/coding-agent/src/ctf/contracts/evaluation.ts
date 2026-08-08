@@ -2,6 +2,7 @@ import * as z from "zod/v4";
 import { CtfIdSchema, DigestSchema, PositiveIntegerSchema } from "./common";
 import { canonicalDigest, type Digest, digestsEqual } from "./digest";
 import { CtfError } from "./errors";
+import { OracleResultV2Schema, oracleResultDigestV2, validateOracleResultV2 } from "./oracle";
 import { SandboxPreflightV1Schema } from "./sandbox";
 
 const SafeRelativePathSchema = z
@@ -229,6 +230,24 @@ export const EvaluationResultV1Schema = z.discriminatedUnion("kind", [
 	UnavailableEvaluationResultV1Schema,
 ]);
 export type EvaluationResultV1 = z.infer<typeof EvaluationResultV1Schema>;
+export const VerifiedEvaluationEvidenceV1Schema = z
+	.object({
+		schemaVersion: z.literal("ctf-verified-evaluation-evidence-1"),
+		kind: z.literal("evidence"),
+		evaluationId: CtfIdSchema,
+		competitionId: CtfIdSchema,
+		runId: CtfIdSchema,
+		challengeId: CtfIdSchema,
+		lineage: EvaluationLineageV1Schema,
+		oracleResult: OracleResultV2Schema,
+		oracleRegistryDigest: DigestSchema,
+		registrySignerFingerprint: DigestSchema,
+		resultSignerFingerprint: DigestSchema,
+		fencingToken: PositiveIntegerSchema,
+		receiptDigest: DigestSchema,
+	})
+	.strict();
+export type VerifiedEvaluationEvidenceV1 = z.infer<typeof VerifiedEvaluationEvidenceV1Schema>;
 
 export function evaluationSpecDigest(spec: EvaluationSpecV1 | Omit<EvaluationSpecV1, "specDigest">): Digest {
 	return canonicalDigest(spec, ["specDigest"]);
@@ -245,6 +264,11 @@ export function evaluationLineageDigest(
 }
 export function evaluationResultDigest(result: EvaluationResultV1 | Omit<EvaluationResultV1, "resultDigest">): Digest {
 	return canonicalDigest(result, ["resultDigest"]);
+}
+export function verifiedEvaluationEvidenceDigest(
+	evidence: VerifiedEvaluationEvidenceV1 | Omit<VerifiedEvaluationEvidenceV1, "receiptDigest">,
+): Digest {
+	return canonicalDigest(evidence, ["receiptDigest"]);
 }
 
 function parseOrThrow<T>(schema: z.ZodType<T>, value: unknown, message: string): T {
@@ -293,6 +317,32 @@ export function validateEvaluationResult(value: unknown): EvaluationResultV1 {
 		throw new CtfError("digest_mismatch", "evaluation result digest mismatch");
 	return result;
 }
+export function validateVerifiedEvaluationEvidence(value: unknown): VerifiedEvaluationEvidenceV1 {
+	const evidence = parseOrThrow(VerifiedEvaluationEvidenceV1Schema, value, "verified evaluation evidence is invalid");
+	const lineage = validateEvaluationLineage(evidence.lineage);
+	const result = validateOracleResultV2(evidence.oracleResult);
+	const identity = result.identity;
+	if (
+		evidence.evaluationId !== identity.evaluationId ||
+		evidence.competitionId !== identity.competitionId ||
+		evidence.runId !== identity.runId ||
+		evidence.challengeId !== identity.challengeId ||
+		lineage.runId !== identity.runId ||
+		lineage.challengeId !== identity.challengeId ||
+		lineage.candidateDigest !== identity.candidateDigest ||
+		lineage.inputDigest !== identity.inputDigest ||
+		lineage.instanceCommitmentDigest !== identity.instanceCommitmentDigest ||
+		lineage.verifiedOracleDigest !== oracleResultDigestV2(result) ||
+		evidence.registrySignerFingerprint === evidence.resultSignerFingerprint
+	)
+		throw new CtfError(
+			"oracle_integrity_error",
+			"verified evaluation evidence identity does not match its oracle result",
+		);
+	if (!digestsEqual(verifiedEvaluationEvidenceDigest(evidence), evidence.receiptDigest))
+		throw new CtfError("digest_mismatch", "verified evaluation evidence receipt digest mismatch");
+	return evidence;
+}
 
 export const EvaluationSpecSchema = EvaluationSpecV1Schema;
 export const EvaluationPreflightSchema = EvaluationPreflightV1Schema;
@@ -302,3 +352,5 @@ export const parseEvaluationSpec = validateEvaluationSpec;
 export const parseEvaluationPreflight = validateEvaluationPreflight;
 export const parseEvaluationLineage = validateEvaluationLineage;
 export const parseEvaluationResult = validateEvaluationResult;
+export const VerifiedEvaluationEvidenceSchema = VerifiedEvaluationEvidenceV1Schema;
+export const parseVerifiedEvaluationEvidence = validateVerifiedEvaluationEvidence;

@@ -1,16 +1,20 @@
-import { createPublicKey, verify as verifySignature } from "node:crypto";
+import { createPublicKey, type KeyObject, verify as verifySignature } from "node:crypto";
 import { canonicalJson, type Digest, digestsEqual, isDigest, sha256Hex } from "../contracts/digest";
 import { CtfError } from "../contracts/errors";
 import {
 	type OracleEntryV1,
+	type OracleEvaluationIdentityV2,
 	type OracleRegistryV1,
 	type OracleResultV1,
+	type OracleResultV2,
+	type OracleTrustAnchorsV1,
 	oracleRegistryDigest,
 	type TrustedOracleKeyV1,
 	type TrustedOracleRegistryV1,
 	validateOracleEntry,
 	validateOracleRegistry,
 	validateOracleResult,
+	validateOracleResultV2,
 	validateOracleTrustAnchors,
 	validateTrustedOracleRegistryShape,
 } from "../contracts/oracle";
@@ -30,9 +34,72 @@ export type VerifiedOracleResult = Readonly<{
 	key: TrustedOracleKeyV1;
 	registryDigest: Digest;
 }>;
+export type VerifiedAnchoredOracleResultV2 = Readonly<{
+	verified: true;
+	result: OracleResultV2;
+	entry: OracleEntryV1;
+	oracleRegistryDigest: Digest;
+	registrySignerFingerprint: Digest;
+	resultSignerFingerprint: Digest;
+}>;
+
+export class AnchoredOracleAuthority {
+	readonly #anchors: OracleTrustAnchorsV1;
+	readonly #expectedRegistryDigest: Digest;
+
+	private constructor(anchors: OracleTrustAnchorsV1, expectedRegistryDigest: Digest) {
+		this.#anchors = anchors;
+		this.#expectedRegistryDigest = expectedRegistryDigest;
+	}
+
+	static create(trustAnchors: unknown, expectedRegistryDigest: Digest): AnchoredOracleAuthority {
+		if (!isDigest(expectedRegistryDigest)) oracleFailure("expected oracle registry digest is invalid");
+		return new AnchoredOracleAuthority(validateOracleTrustAnchors(trustAnchors), expectedRegistryDigest);
+	}
+
+	verify(registry: unknown, value: unknown, expected: OracleEvaluationIdentityV2): VerifiedAnchoredOracleResultV2 {
+		const trusted = validateAnchoredOracleRegistry(registry, this.#anchors);
+		if (!digestsEqual(trusted.registry.registryDigest, this.#expectedRegistryDigest))
+			oracleFailure("anchored oracle registry digest does not match the expected registry");
+		const result = validateOracleResultV2(value, undefined, expected);
+		const entry = trusted.registry.entries.find(candidate => candidate.oracleId === result.oracleId);
+		if (entry === undefined) oracleFailure(`oracle is not registered: ${result.oracleId}`);
+		if (result.schemaVersion !== entry.outputSchemaVersion)
+			oracleFailure("oracle V2 result schema version does not match registered output schema");
+		if (!entry.allowedChallengeIds.includes(result.identity.challengeId))
+			oracleFailure(`oracle is not authorized for challenge: ${result.identity.challengeId}`);
+		const resultKey = keyById(trusted.keys, entry.publicKeyId);
+		const { signature: _signature, ...unsignedResult } = result;
+		if (!verifySignedPayload(unsignedResult, result.signature, resultKey))
+			oracleFailure("oracle V2 result signature is invalid");
+		return {
+			verified: true,
+			result,
+			entry,
+			oracleRegistryDigest: requireOracleDigest(trusted.registry.registryDigest, "anchored oracle registry digest"),
+			registrySignerFingerprint: requireOracleDigest(
+				this.#anchors.registrySignerFingerprint,
+				"registry signer fingerprint",
+			),
+			resultSignerFingerprint: requireOracleDigest(resultKey.fingerprint, "result signer fingerprint"),
+		};
+	}
+}
+
+export function createAnchoredOracleAuthority(
+	trustAnchors: unknown,
+	expectedRegistryDigest: Digest,
+): AnchoredOracleAuthority {
+	return AnchoredOracleAuthority.create(trustAnchors, expectedRegistryDigest);
+}
 
 function oracleFailure(message: string, details?: Record<string, unknown>): never {
 	throw new CtfError("oracle_integrity_error", message, { details });
+}
+
+function requireOracleDigest(value: unknown, label: string): Digest {
+	if (!isDigest(value)) oracleFailure(`${label} is invalid`);
+	return value;
 }
 
 function decodeSignature(value: string): Buffer {
@@ -49,7 +116,7 @@ function decodeSignature(value: string): Buffer {
 	}
 }
 
-function publicKeyObject(key: TrustedOracleKeyV1): ReturnType<typeof createPublicKey> {
+function publicKeyObject(key: TrustedOracleKeyV1): KeyObject {
 	try {
 		if (key.publicKey.includes("BEGIN PUBLIC KEY")) return createPublicKey(key.publicKey);
 		const der = Buffer.from(key.publicKey, "base64");

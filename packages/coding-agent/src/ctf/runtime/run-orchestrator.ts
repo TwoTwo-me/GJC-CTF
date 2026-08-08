@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+import { type Digest, isDigest } from "../contracts/digest";
 import { CtfError } from "../contracts/errors";
+import { type VerifiedEvaluationEvidenceV1, validateVerifiedEvaluationEvidence } from "../contracts/evaluation";
 import { type RunOwnerV1, validateRunOwner } from "../contracts/run";
 import { effectiveSkillDigest } from "../contracts/skill";
 import { loadCtfSkillIdentity } from "../skills/identity-loader";
 import { CanonicalEventLog } from "../state/event-log";
 import { RunLeaseStore } from "../state/lease";
-import { createCtfStateStore } from "../state/storage";
+import { type CtfStateStore, createCtfStateStore } from "../state/storage";
 import type { CtfWorkspace } from "../workspace";
 import type { CtfPreparedRun, CtfSolverOutcome } from "./scheduler";
 
@@ -107,6 +109,11 @@ function payloadNumber(payload: Record<string, unknown>, key: string): number | 
 	return typeof value === "number" && Number.isInteger(value) ? value : undefined;
 }
 
+function requireEvidenceDigest(value: unknown): Digest {
+	if (!isDigest(value)) throw new CtfError("digest_mismatch", "evaluation evidence receipt digest is invalid");
+	return value;
+}
+
 /**
  * Create an auditable blocked run without pretending that a solver or oracle
  * exists. The run owner and lifecycle events remain durable for later resume.
@@ -188,6 +195,148 @@ export async function createUnavailableRun(
 		mode,
 		reason: UNAVAILABLE_RESULT_REASON,
 	};
+}
+export type CtfEvidenceReceiptRecordingRequest = Readonly<{
+	runId: string;
+	challengeId: string;
+	fencingToken: number;
+	evidence: VerifiedEvaluationEvidenceV1;
+}>;
+
+async function persistEvidenceReceipt(
+	store: CtfStateStore,
+	runId: string,
+	evidence: VerifiedEvaluationEvidenceV1,
+): Promise<void> {
+	const path = `runs/${runId}/evidence/${evidence.receiptDigest}.json`;
+	await store.withLock(path, async () => {
+		try {
+			const existing = validateVerifiedEvaluationEvidence(
+				JSON.parse(await fs.readFile(store.resolve(path), "utf8")),
+			);
+			if (existing.receiptDigest !== evidence.receiptDigest)
+				throw new CtfError("integrity_error", "existing evidence receipt does not match its path");
+			return;
+		} catch (error) {
+			if (typeof error !== "object" || error === null || !("code" in error) || error.code !== "ENOENT") throw error;
+		}
+		await store.writeJsonAtomic(path, evidence);
+	});
+}
+
+async function readEvidenceReceipt(
+	store: CtfStateStore,
+	runId: string,
+	receiptDigest: VerifiedEvaluationEvidenceV1["receiptDigest"],
+): Promise<VerifiedEvaluationEvidenceV1 | undefined> {
+	try {
+		return validateVerifiedEvaluationEvidence(
+			JSON.parse(await fs.readFile(store.resolve(`runs/${runId}/evidence/${receiptDigest}.json`), "utf8")),
+		);
+	} catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
+/**
+ * Attach already verified, anchored evaluation evidence under the live leader
+ * fence. The resulting terminal state is deliberately blocked and unscored.
+ */
+export async function recordVerifiedEvaluationEvidence(
+	workspace: CtfWorkspace,
+	request: CtfEvidenceReceiptRecordingRequest,
+): Promise<RunOwnerV1> {
+	if (!request.runId.trim() || !request.challengeId.trim())
+		throw new CtfError("invalid_api_request", "run id and challenge id are required");
+	const evidence = validateVerifiedEvaluationEvidence(request.evidence);
+	const receiptDigest = requireEvidenceDigest(evidence.receiptDigest);
+	if (
+		evidence.competitionId !== workspace.manifest.competitionId ||
+		evidence.runId !== request.runId ||
+		evidence.challengeId !== request.challengeId ||
+		evidence.fencingToken !== request.fencingToken
+	)
+		throw new CtfError("cross_challenge_reference", "evidence receipt does not match the requested run fence");
+	challengeExists(workspace, request.challengeId);
+	const store = createCtfStateStore(workspace.stateRoot);
+	const lease = new RunLeaseStore(store, {
+		competitionId: workspace.manifest.competitionId,
+		challengeId: request.challengeId,
+	});
+	const owner = await lease.read();
+	if (
+		owner === undefined ||
+		owner.runId !== request.runId ||
+		owner.competitionId !== evidence.competitionId ||
+		owner.challengeId !== evidence.challengeId ||
+		owner.fencingToken !== request.fencingToken
+	)
+		throw new CtfError("stale_run_fence", "evidence receipt is not bound to the live run leader");
+	const eventLog = new CanonicalEventLog(store, {
+		competitionId: owner.competitionId,
+		challengeId: owner.challengeId,
+	});
+	if (owner.state === "blocked") {
+		const existing = await readEvidenceReceipt(store, owner.runId, receiptDigest);
+		const history = await eventLog.read();
+		const terminal = history.events.find(
+			event =>
+				event.runId === owner.runId &&
+				event.idempotencyKey === `${owner.runId}:verified-evidence-pending-score-authority`,
+		);
+		if (
+			existing?.receiptDigest !== evidence.receiptDigest ||
+			terminal?.payload.reason !== "verified_evidence_pending_score_authority" ||
+			!terminal.evidenceRefs.includes(receiptDigest)
+		)
+			throw new CtfError("invalid_transition", "blocked run does not contain this evaluation evidence receipt");
+		return owner;
+	}
+	if (owner.state !== "running")
+		throw new CtfError("invalid_transition", "only a running leader lease can record evaluation evidence");
+	const history = await eventLog.read();
+	const started = history.events.find(event => event.runId === owner.runId && event.eventType === "run_started");
+	const mode = started?.payload.mode;
+	if (mode !== "competition" && mode !== "benchmark")
+		throw new CtfError("integrity_error", "run has no valid started mode for evidence recording");
+	await persistEvidenceReceipt(store, owner.runId, evidence);
+	try {
+		await eventLog.appendDraft({
+			eventType: "run_heartbeat",
+			competitionId: owner.competitionId,
+			challengeId: owner.challengeId,
+			runId: owner.runId,
+			idempotencyKey: `${owner.runId}:evidence:${receiptDigest}`,
+			actor: owner.ownerId,
+			payload: {
+				fencingToken: owner.fencingToken,
+				receiptDigest,
+				state: "running",
+			},
+			evidenceRefs: [receiptDigest],
+		});
+		await eventLog.appendDraft({
+			eventType: "run_terminal",
+			competitionId: owner.competitionId,
+			challengeId: owner.challengeId,
+			runId: owner.runId,
+			idempotencyKey: `${owner.runId}:verified-evidence-pending-score-authority`,
+			actor: owner.ownerId,
+			payload: {
+				mode,
+				state: "blocked",
+				reason: "verified_evidence_pending_score_authority",
+				fencingToken: owner.fencingToken,
+			},
+			evidenceRefs: [receiptDigest],
+		});
+		const blocked = await lease.transition(owner.runId, owner.fencingToken, owner.ownerId, "blocked");
+		await store.writeJsonAtomic(`runs/${owner.runId}/owner.json`, blocked);
+		return blocked;
+	} catch (error) {
+		throw terminalPersistenceError(error);
+	}
 }
 
 export type CtfSolverRunPreparationRequest = Readonly<{

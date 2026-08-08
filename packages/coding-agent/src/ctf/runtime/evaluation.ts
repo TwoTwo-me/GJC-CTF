@@ -8,12 +8,15 @@ import {
 	type EvaluationSpecV1,
 	evaluationLineageDigest,
 	evaluationResultDigest,
+	type VerifiedEvaluationEvidenceV1,
 	validateEvaluationPreflight,
 	validateEvaluationResult,
 	validateEvaluationSpec,
+	validateVerifiedEvaluationEvidence,
+	verifiedEvaluationEvidenceDigest,
 } from "../contracts/evaluation";
-import { oracleResultDigest } from "../contracts/oracle";
-import { type TrustedOracleRegistry, verifyTrustedOracleResult } from "./oracle";
+import { type OracleEvaluationIdentityV2, oracleResultDigestV2 } from "../contracts/oracle";
+import type { AnchoredOracleAuthority } from "./oracle";
 
 const secretLeaseBrand: unique symbol = Symbol("ctf-secret-lease");
 /** Opaque runtime capability resolved only by the trusted injected driver; it never contains or serializes raw secret bytes. */
@@ -63,23 +66,25 @@ export type CandidateCollector = (
 		signal?: AbortSignal;
 	}>,
 ) => Promise<CandidateSubmission>;
-export type TrustedOracleCallback = (
-	request: Readonly<{
-		runId: string;
-		challengeId: string;
-		nonce: string;
-		candidateDigest: Digest;
-		inputDigest: Digest;
-	}>,
-) => Promise<unknown>;
+export type TrustedOracleExecutor = Readonly<{
+	execute(
+		request: Readonly<{ identity: OracleEvaluationIdentityV2; candidate: Uint8Array }>,
+	): Promise<Readonly<{ registry: unknown; result: unknown }>>;
+}>;
+export type EvaluationReceiptAuthority = Readonly<{
+	competitionId: string;
+	fencingToken: number;
+}>;
+export type LocalEvaluationOutcome = EvaluationResultV1 | VerifiedEvaluationEvidenceV1;
 export type LocalEvaluationRequest = Readonly<{
 	spec: EvaluationSpecV1;
 	preflight: EvaluationPreflightV1;
 	lineage: EvaluationLineageInput;
 	adapters: readonly EvaluationRuntimeAdapter[];
 	collectCandidate: CandidateCollector;
-	trustedOracle?: TrustedOracleRegistry;
-	requestOracle?: TrustedOracleCallback;
+	receiptAuthority?: EvaluationReceiptAuthority;
+	oracleAuthority?: AnchoredOracleAuthority;
+	trustedOracleExecutor?: TrustedOracleExecutor;
 	signal?: AbortSignal;
 }>;
 
@@ -264,7 +269,7 @@ async function destroySessions(sessions: readonly EvaluationAdapterSession[]): P
 	if (failures.length > 0) throw new AggregateError(failures, "evaluation session cleanup failed");
 }
 /** Local services/checkers only prepare public capabilities. Solver candidates come solely from collectCandidate. */
-export async function evaluateLocalCandidate(request: LocalEvaluationRequest): Promise<EvaluationResultV1> {
+export async function evaluateLocalCandidate(request: LocalEvaluationRequest): Promise<LocalEvaluationOutcome> {
 	const spec = validateEvaluationSpec(request.spec);
 	const preflight = validateEvaluationPreflight(request.preflight);
 	const broker = new SecretBroker();
@@ -272,6 +277,7 @@ export async function evaluateLocalCandidate(request: LocalEvaluationRequest): P
 	let lineage = buildLineage(request.lineage, emptyDigest, broker.commitment());
 	const sessions: EvaluationAdapterSession[] = [];
 	const complete = (result: EvaluationResultV1): EvaluationResultV1 => result;
+	let pendingEvidence: Omit<VerifiedEvaluationEvidenceV1, "receiptDigest"> | undefined;
 	const execute = async (): Promise<EvaluationResultV1> => {
 		try {
 			if (!preflight.passed)
@@ -368,11 +374,7 @@ export async function evaluateLocalCandidate(request: LocalEvaluationRequest): P
 				);
 			const candidateDigest = sha256Hex(bytes);
 			lineage = buildLineage(request.lineage, candidateDigest, broker.commitment());
-			if (request.trustedOracle === undefined || request.requestOracle === undefined) {
-				if (cancellationRequested(request.signal))
-					return complete(
-						unavailable(spec.evaluationId, lineage, "candidate", "not_available", "evaluation cancelled"),
-					);
+			const candidateResult = (): EvaluationResultV1 => {
 				const unsigned = {
 					schemaVersion: "ctf-evaluation-result-1" as const,
 					kind: "candidate" as const,
@@ -381,40 +383,74 @@ export async function evaluateLocalCandidate(request: LocalEvaluationRequest): P
 					candidateDigest,
 				};
 				return complete(validateEvaluationResult({ ...unsigned, resultDigest: evaluationResultDigest(unsigned) }));
+			};
+			const evidenceRequested =
+				request.receiptAuthority !== undefined ||
+				request.oracleAuthority !== undefined ||
+				request.trustedOracleExecutor !== undefined;
+			if (!evidenceRequested) {
+				bytes.fill(0);
+				return candidateResult();
+			}
+			if (
+				request.receiptAuthority === undefined ||
+				request.oracleAuthority === undefined ||
+				request.trustedOracleExecutor === undefined
+			) {
+				bytes.fill(0);
+				return complete(
+					unavailable(
+						spec.evaluationId,
+						lineage,
+						"verification",
+						"not_available",
+						"trusted oracle verification is unavailable",
+					),
+				);
 			}
 			try {
-				const value = await request.requestOracle({
+				const identity: OracleEvaluationIdentityV2 = {
+					evaluationId: spec.evaluationId,
+					competitionId: request.receiptAuthority.competitionId,
 					runId: request.lineage.runId,
 					challengeId: spec.challengeId,
 					nonce,
 					candidateDigest,
 					inputDigest: requireDigest(request.lineage.inputDigest, "evaluation input digest"),
-				});
+					instanceCommitmentDigest: broker.commitment(),
+				};
+				const oracleCandidate = new Uint8Array(bytes);
+				bytes.fill(0);
+				let response: Readonly<{ registry: unknown; result: unknown }>;
+				try {
+					response = await request.trustedOracleExecutor.execute({ identity, candidate: oracleCandidate });
+				} finally {
+					oracleCandidate.fill(0);
+				}
 				if (cancellationRequested(request.signal))
 					return complete(
 						unavailable(spec.evaluationId, lineage, "verification", "not_available", "evaluation cancelled"),
 					);
-				const verified = verifyTrustedOracleResult(request.trustedOracle, value, {
-					runId: request.lineage.runId,
-					challengeId: spec.challengeId,
-					nonce,
-					candidateDigest,
-					inputDigest: requireDigest(request.lineage.inputDigest, "evaluation input digest"),
-				});
-				const verifiedOracleDigest = oracleResultDigest(verified.result);
+				const verified = request.oracleAuthority.verify(response.registry, response.result, identity);
+				const verifiedOracleDigest = oracleResultDigestV2(verified.result);
 				lineage = buildLineage(request.lineage, candidateDigest, broker.commitment(), verifiedOracleDigest);
-				const unsigned = {
-					schemaVersion: "ctf-evaluation-result-1" as const,
-					kind: "verified" as const,
+				pendingEvidence = {
+					schemaVersion: "ctf-verified-evaluation-evidence-1",
+					kind: "evidence",
 					evaluationId: spec.evaluationId,
+					competitionId: identity.competitionId,
+					runId: identity.runId,
+					challengeId: identity.challengeId,
 					lineage,
-					candidateDigest,
-					verdict: verified.result.verdict,
-					oracleId: verified.result.oracleId,
-					verifiedOracleDigest,
+					oracleResult: verified.result,
+					oracleRegistryDigest: verified.oracleRegistryDigest,
+					registrySignerFingerprint: verified.registrySignerFingerprint,
+					resultSignerFingerprint: verified.resultSignerFingerprint,
+					fencingToken: request.receiptAuthority.fencingToken,
 				};
-				return complete(validateEvaluationResult({ ...unsigned, resultDigest: evaluationResultDigest(unsigned) }));
+				return candidateResult();
 			} catch {
+				bytes.fill(0);
 				return complete(
 					unavailable(
 						spec.evaluationId,
@@ -475,10 +511,18 @@ export async function evaluateLocalCandidate(request: LocalEvaluationRequest): P
 		return unavailable(
 			spec.evaluationId,
 			lineage,
-			result.kind === "verified" ? "verification" : "candidate",
+			pendingEvidence === undefined && result.kind === "verified"
+				? "verification"
+				: pendingEvidence === undefined
+					? "candidate"
+					: "verification",
 			"not_available",
 			"evaluation cancelled",
 		);
+	if (pendingEvidence !== undefined && result.kind !== "unavailable") {
+		const evidence = { ...pendingEvidence, receiptDigest: verifiedEvaluationEvidenceDigest(pendingEvidence) };
+		return validateVerifiedEvaluationEvidence(evidence);
+	}
 	return result;
 }
 export const runLocalEvaluation = evaluateLocalCandidate;

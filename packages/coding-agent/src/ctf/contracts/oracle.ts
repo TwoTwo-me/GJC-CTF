@@ -79,6 +79,34 @@ export const OracleResultV1Schema = z
 	})
 	.strict();
 export type OracleResultV1 = z.infer<typeof OracleResultV1Schema>;
+export const OracleEvaluationIdentityV2Schema = z
+	.object({
+		evaluationId: CtfIdSchema,
+		competitionId: CtfIdSchema,
+		runId: CtfIdSchema,
+		challengeId: CtfIdSchema,
+		nonce: CtfIdSchema,
+		candidateDigest: DigestSchema,
+		inputDigest: DigestSchema,
+		instanceCommitmentDigest: DigestSchema,
+	})
+	.strict();
+export type OracleEvaluationIdentityV2 = z.infer<typeof OracleEvaluationIdentityV2Schema>;
+
+export const OracleResultV2Schema = z
+	.object({
+		schemaVersion: z.literal("ctf-oracle-result-2"),
+		oracleId: CtfIdSchema,
+		identity: OracleEvaluationIdentityV2Schema,
+		verdict: z.enum(["pass", "fail", "invalid", "error"]),
+		verifierVersion: z.string().min(1).max(128),
+		outputDigest: DigestSchema,
+		sanitizedSummary: OracleSanitizedSummaryV1Schema,
+		signature: z.string().min(1).max(16_384),
+		issuedAt: TimestampSchema.optional(),
+	})
+	.strict();
+export type OracleResultV2 = z.infer<typeof OracleResultV2Schema>;
 
 export function oracleEntryDigest(entry: OracleEntryV1): Digest {
 	return canonicalDigest(entry);
@@ -89,6 +117,9 @@ export function oracleRegistryDigest(registry: OracleRegistryV1 | Omit<OracleReg
 }
 
 export function oracleResultDigest(result: OracleResultV1): Digest {
+	return canonicalDigest(result);
+}
+export function oracleResultDigestV2(result: OracleResultV2): Digest {
 	return canonicalDigest(result);
 }
 
@@ -165,6 +196,39 @@ export function validateOracleResult(
 		for (const field of ["runId", "challengeId", "nonce", "candidateDigest", "inputDigest"] as const) {
 			if (result[field] !== expected[field])
 				throw new CtfError("oracle_integrity_error", `oracle result ${field} does not match request`);
+		}
+	}
+	return result;
+}
+export function validateOracleResultV2(
+	value: unknown,
+	entry?: OracleEntryV1,
+	expected?: OracleEvaluationIdentityV2,
+): OracleResultV2 {
+	const parsed = OracleResultV2Schema.safeParse(value);
+	if (!parsed.success)
+		throw new CtfError("oracle_integrity_error", "oracle V2 result is invalid", {
+			details: { issues: parsed.error.issues },
+		});
+	const result = parsed.data;
+	if (entry !== undefined) {
+		validateOracleEntry(entry);
+		if (entry.oracleId !== result.oracleId || !entry.allowedChallengeIds.includes(result.identity.challengeId))
+			throw new CtfError("oracle_integrity_error", "oracle V2 result is not authorized for this challenge");
+	}
+	if (expected !== undefined) {
+		for (const field of [
+			"evaluationId",
+			"competitionId",
+			"runId",
+			"challengeId",
+			"nonce",
+			"candidateDigest",
+			"inputDigest",
+			"instanceCommitmentDigest",
+		] as const) {
+			if (result.identity[field] !== expected[field])
+				throw new CtfError("oracle_integrity_error", `oracle V2 result ${field} does not match request`);
 		}
 	}
 	return result;
