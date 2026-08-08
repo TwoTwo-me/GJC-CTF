@@ -100,6 +100,11 @@ bun packages/coding-agent/bin/gjc-ctf.js dashboard --port 0
 ```
 
 `init` is idempotent for an existing valid workspace and refuses a non-empty unmarked directory. `status` searches upward. The dashboard is read-only and loopback-only; unavailable, lagging, rebuilding, or corrupt state is reported rather than fabricated.
+### Captured fail-closed dashboard evidence
+
+![GJC CTF dashboard reporting unavailable verified projection](../../../../artifacts/ctf/ctf-dashboard-v3.png)
+
+The checked-in capture has SHA-256 `30b82a244ea1139a614668733adff5bc72c7dd4e248ee4b513e11bf9884429a6`. It was produced from the compiled loopback-only dashboard in an empty isolated workspace. The visible `integrity_error` is intentional evidence that a missing verified event revision is reported rather than replaced with fabricated runs, scores, candidates, or flags. Dashboard images are diagnostic artifacts only and never oracle or solve evidence.
 
 The CLI can schedule bounded candidate work, but its stock invocation injects no backend, permission authority, calibration, runtime preflight, or independent oracle. It therefore refuses rather than claiming a solve. There is no CLI command that makes a candidate verified or expands a tier.
 
