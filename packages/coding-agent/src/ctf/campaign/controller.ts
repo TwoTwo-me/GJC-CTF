@@ -22,6 +22,7 @@ import { type CtfStateStoreLike, createCtfStateStore } from "../state/storage";
 export const CTF_CAMPAIGN_HARD_STOP = "2026-08-09T00:00:00Z" as const;
 const CAMPAIGN_SCHEMA = "ctf-campaign-1" as const;
 const MAX_REASON_LENGTH = 256;
+const CAMPAIGN_FINALIZATION_SCHEMA = "ctf-campaign-finalization-1" as const;
 
 export type CampaignAttempt = Readonly<{
 	attempt: number;
@@ -48,6 +49,15 @@ export type CampaignChallenge = Readonly<{
 	attempts: readonly CampaignAttempt[];
 	materialized?: CampaignMaterialized;
 }>;
+export type CampaignFinalization = Readonly<{
+	schemaVersion: typeof CAMPAIGN_FINALIZATION_SCHEMA;
+	campaignId: string;
+	competitionId: string;
+	stopAt: typeof CTF_CAMPAIGN_HARD_STOP;
+	preFinalStateDigest: Digest;
+	challengeStateDigest: Digest;
+	finalizationDigest: Digest;
+}>;
 
 export type CtfCampaignState = Readonly<{
 	schemaVersion: typeof CAMPAIGN_SCHEMA;
@@ -58,6 +68,7 @@ export type CtfCampaignState = Readonly<{
 	stopAt: typeof CTF_CAMPAIGN_HARD_STOP;
 	challenges: readonly CampaignChallenge[];
 	stateDigest: Digest;
+	finalization?: CampaignFinalization;
 }>;
 
 export type CtfCampaignMaterializer = ((
@@ -113,15 +124,71 @@ function campaignPath(id: string): string {
 		throw new CtfError("invalid_api_request", "campaign id is invalid");
 	return path.posix.join("campaigns", `${id}.json`);
 }
+function campaignFinalizationPath(id: string): string {
+	return path.posix.join("campaigns", `${id}.finalization.json`);
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+	const actual = Object.keys(value).sort();
+	const expected = [...keys].sort();
+	return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
 function sealState(state: Omit<CtfCampaignState, "stateDigest">): CtfCampaignState {
 	return { ...state, stateDigest: canonicalDigest(state) };
+}
+function sealFinalization(
+	state: Omit<CtfCampaignState, "stateDigest" | "finalization">,
+	preFinalStateDigest: Digest,
+): CampaignFinalization {
+	const basis = {
+		schemaVersion: CAMPAIGN_FINALIZATION_SCHEMA,
+		campaignId: state.campaignId,
+		competitionId: state.competitionId,
+		stopAt: state.stopAt,
+		preFinalStateDigest,
+		challengeStateDigest: canonicalDigest(state.challenges),
+	};
+	return { ...basis, finalizationDigest: canonicalDigest(basis) };
+}
+
+function finalizeState(state: CtfCampaignState): CtfCampaignState {
+	const { stateDigest: preFinalStateDigest, finalization: _finalization, ...basis } = state;
+	const finalization = sealFinalization(basis, preFinalStateDigest);
+	return sealState({ ...basis, finalization });
+}
+
+function validFinalization(value: unknown): value is CampaignFinalization {
+	if (
+		!isRecord(value) ||
+		!hasExactKeys(value, [
+			"schemaVersion",
+			"campaignId",
+			"competitionId",
+			"stopAt",
+			"preFinalStateDigest",
+			"challengeStateDigest",
+			"finalizationDigest",
+		])
+	)
+		return false;
+	const { finalizationDigest, ...basis } = value;
+	return (
+		value.schemaVersion === CAMPAIGN_FINALIZATION_SCHEMA &&
+		typeof value.campaignId === "string" &&
+		typeof value.competitionId === "string" &&
+		value.stopAt === CTF_CAMPAIGN_HARD_STOP &&
+		isDigest(value.preFinalStateDigest) &&
+		isDigest(value.challengeStateDigest) &&
+		isDigest(finalizationDigest) &&
+		canonicalDigest(basis) === finalizationDigest
+	);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function validArtifactEvidence(value: unknown): value is CtfArtifactEvidence {
-	if (!isRecord(value)) return false;
+	if (!isRecord(value) || !hasExactKeys(value, ["path", "digest", "size"])) return false;
 	const size = value.size;
 	return (
 		typeof value.path === "string" &&
@@ -214,6 +281,31 @@ function attemptLineageMatches(attempt: CampaignAttempt, lineage: CampaignCandid
 export function validateCampaignState(value: unknown): CtfCampaignState {
 	if (
 		!isRecord(value) ||
+		!hasExactKeys(
+			value,
+			value.finalization === undefined
+				? [
+						"schemaVersion",
+						"campaignId",
+						"competitionId",
+						"createdAt",
+						"updatedAt",
+						"stopAt",
+						"challenges",
+						"stateDigest",
+					]
+				: [
+						"schemaVersion",
+						"campaignId",
+						"competitionId",
+						"createdAt",
+						"updatedAt",
+						"stopAt",
+						"challenges",
+						"stateDigest",
+						"finalization",
+					],
+		) ||
 		value.schemaVersion !== CAMPAIGN_SCHEMA ||
 		typeof value.campaignId !== "string" ||
 		typeof value.competitionId !== "string" ||
@@ -225,11 +317,28 @@ export function validateCampaignState(value: unknown): CtfCampaignState {
 	)
 		throw new CtfError("integrity_error", "campaign state schema is invalid");
 	const { stateDigest, ...basis } = value;
-	if (canonicalDigest(basis) !== stateDigest)
-		throw new CtfError("integrity_error", "campaign state digest is invalid");
+	if (value.finalization !== undefined) {
+		if (Date.now() < Date.parse(CTF_CAMPAIGN_HARD_STOP) || !validFinalization(value.finalization))
+			throw new CtfError("integrity_error", "campaign finalization is invalid");
+		const { finalization, stateDigest: _stateDigest, ...preFinalBasis } = value;
+		if (
+			finalization.campaignId !== value.campaignId ||
+			finalization.competitionId !== value.competitionId ||
+			finalization.stopAt !== value.stopAt ||
+			!digestsEqual(finalization.preFinalStateDigest, canonicalDigest(preFinalBasis)) ||
+			!digestsEqual(finalization.challengeStateDigest, canonicalDigest(value.challenges))
+		)
+			throw new CtfError("integrity_error", "campaign finalization does not match state");
+	}
 	for (const challenge of value.challenges) {
 		if (
 			!isRecord(challenge) ||
+			!hasExactKeys(
+				challenge,
+				challenge.materialized === undefined
+					? ["challengeId", "inputDigest", "status", "attempts"]
+					: ["challengeId", "inputDigest", "status", "attempts", "materialized"],
+			) ||
 			typeof challenge.challengeId !== "string" ||
 			!isDigest(challenge.inputDigest) ||
 			!["pending", "candidate", "unknown", "failure"].includes(String(challenge.status)) ||
@@ -240,9 +349,21 @@ export function validateCampaignState(value: unknown): CtfCampaignState {
 		for (const [index, attempt] of challenge.attempts.entries()) {
 			if (
 				!isRecord(attempt) ||
+				!hasExactKeys(attempt, [
+					"attempt",
+					"startedAt",
+					"status",
+					"artifacts",
+					...(attempt.finishedAt === undefined ? [] : ["finishedAt"]),
+					...(attempt.reason === undefined ? [] : ["reason"]),
+					...(attempt.artifactEvidence === undefined ? [] : ["artifactEvidence"]),
+					...(attempt.producerDigest === undefined ? [] : ["producerDigest", "routeDigest"]),
+				]) ||
 				attempt.attempt !== index + 1 ||
 				typeof attempt.startedAt !== "string" ||
 				!["candidate", "unknown", "failure"].includes(String(attempt.status)) ||
+				(attempt.finishedAt !== undefined && typeof attempt.finishedAt !== "string") ||
+				(attempt.reason !== undefined && typeof attempt.reason !== "string") ||
 				!Array.isArray(attempt.artifacts) ||
 				(attempt.producerDigest === undefined) !== (attempt.routeDigest === undefined) ||
 				(attempt.producerDigest !== undefined &&
@@ -279,6 +400,8 @@ export function validateCampaignState(value: unknown): CtfCampaignState {
 				throw new CtfError("integrity_error", "campaign attempt state is invalid");
 		}
 	}
+	if (canonicalDigest(basis) !== stateDigest)
+		throw new CtfError("integrity_error", "campaign state digest is invalid");
 	return value as CtfCampaignState;
 }
 
@@ -296,6 +419,25 @@ async function loadState(
 		throw new CtfError("integrity_error", "campaign state is corrupt");
 	}
 	return validateCampaignState(value);
+}
+async function loadFinalizationAnchor(
+	store: ReturnType<typeof createCtfStateStore>,
+	target: string,
+): Promise<CampaignFinalization | undefined> {
+	const file = Bun.file(store.resolve(target));
+	if (!(await file.exists())) return undefined;
+	let value: unknown;
+	try {
+		value = JSON.parse(await file.text()) as unknown;
+	} catch {
+		throw new CtfError("integrity_error", "campaign finalization anchor is corrupt");
+	}
+	if (!validFinalization(value)) throw new CtfError("integrity_error", "campaign finalization anchor is invalid");
+	return value;
+}
+
+function finalizationsEqual(left: CampaignFinalization, right: CampaignFinalization): boolean {
+	return canonicalDigest(left) === canonicalDigest(right);
 }
 
 function initialState(options: CtfCampaignOptions, now: Date): CtfCampaignState {
@@ -340,7 +482,11 @@ function createDeadlineSignal(signal: AbortSignal | undefined): Readonly<{
 }> {
 	const stop = Date.parse(CTF_CAMPAIGN_HARD_STOP);
 	const controller = new AbortController();
-	const abortForDeadline = () => controller.abort("campaign deadline reached");
+	let deadlineReached = false;
+	const abortForDeadline = () => {
+		deadlineReached = true;
+		controller.abort("campaign deadline reached");
+	};
 	const remainingMs = stop - Date.now();
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	if (remainingMs <= 0) abortForDeadline();
@@ -350,7 +496,7 @@ function createDeadlineSignal(signal: AbortSignal | undefined): Readonly<{
 	else signal?.addEventListener("abort", abortForCaller, { once: true });
 	return {
 		signal: controller.signal,
-		reached: () => controller.signal.reason === "campaign deadline reached" || Date.now() >= stop,
+		reached: () => deadlineReached || Date.now() >= stop,
 		dispose: () => {
 			if (timer !== undefined) clearTimeout(timer);
 			signal?.removeEventListener("abort", abortForCaller);
@@ -442,6 +588,26 @@ async function runCtfCampaignWithDeadline(
 	const stop = Date.parse(CTF_CAMPAIGN_HARD_STOP);
 	const initial = initialState(options, now());
 	let state = await loadState(store, target, initial);
+	const finalizationTarget = campaignFinalizationPath(options.campaignId);
+	const anchor = await loadFinalizationAnchor(store, finalizationTarget);
+	if (state.finalization === undefined && anchor !== undefined) {
+		if (
+			Date.now() < stop ||
+			anchor.campaignId !== state.campaignId ||
+			anchor.competitionId !== state.competitionId ||
+			anchor.stopAt !== state.stopAt ||
+			!digestsEqual(anchor.preFinalStateDigest, state.stateDigest) ||
+			!digestsEqual(anchor.challengeStateDigest, canonicalDigest(state.challenges))
+		)
+			throw new CtfError("integrity_error", "campaign finalization anchor does not match state");
+		const { stateDigest: _stateDigest, ...basis } = state;
+		state = validateCampaignState(sealState({ ...basis, finalization: anchor }));
+		await store.writeJsonAtomic(target, state, { durability: "ctf" });
+	}
+	if (state.finalization !== undefined && anchor === undefined)
+		throw new CtfError("integrity_error", "campaign finalization state and anchor do not match");
+	if (state.finalization !== undefined && !finalizationsEqual(state.finalization, anchor!))
+		throw new CtfError("integrity_error", "campaign finalization anchor does not match state");
 	if (
 		state.campaignId !== options.campaignId ||
 		state.competitionId !== options.competitionId ||
@@ -462,7 +628,7 @@ async function runCtfCampaignWithDeadline(
 			(challenge.materialized !== undefined && !materializedMatchesEntry(challenge.materialized, entry))
 		)
 			throw new CtfError("integrity_error", "campaign challenge input identity does not match");
-		if (challenge.status === "candidate") {
+		if (challenge.status === "candidate" && state.finalization === undefined) {
 			const attempt = challenge.attempts.at(-1);
 			const lineage =
 				options.candidateLineageFor === undefined
@@ -477,6 +643,7 @@ async function runCtfCampaignWithDeadline(
 				throw new CtfError("integrity_error", "campaign candidate lineage does not match");
 		}
 	}
+	if (state.finalization !== undefined) return { state, runs: [], stopped: true };
 	const materialize = options.materialize ?? defaultMaterializer(options);
 	const materializationOwners = new Set<string>();
 	const runs: CtfBatchScheduleResult[] = [];
@@ -589,6 +756,21 @@ async function runCtfCampaignWithDeadline(
 		await store.writeJsonAtomic(target, state, { durability: "ctf" });
 		if (options.backoffMs !== undefined && options.backoffMs > 0 && now().getTime() < stop)
 			await backoffWithAbort(Math.min(options.backoffMs, Math.max(0, stop - now().getTime())), deadline.signal);
+	}
+	if (Date.now() >= stop) {
+		if (anchor === undefined) {
+			if (!(await Bun.file(store.resolve(target)).exists())) {
+				state = validateCampaignState(state);
+				await store.writeJsonAtomic(target, state, { durability: "ctf" });
+			}
+			state = finalizeState(state);
+			await store.writeJsonAtomic(finalizationTarget, state.finalization!, { durability: "ctf" });
+		} else {
+			state = finalizeState(state);
+			if (!finalizationsEqual(anchor, state.finalization!))
+				throw new CtfError("integrity_error", "campaign finalization anchor cannot be altered");
+		}
+		await store.writeJsonAtomic(target, state, { durability: "ctf" });
 	}
 	return { state, runs, stopped: deadline.reached() };
 }

@@ -7,6 +7,8 @@ import { canonicalDigest, sha256Hex } from "../../src/ctf/contracts/digest";
 import type { CorpusEntry, MaterializedCorpus } from "../../src/ctf/corpus";
 import { LACTF_2026_CORPUS_SOURCES } from "../../src/ctf/corpus";
 import type { CtfSolverBackend, CtfTerminationRequest } from "../../src/ctf/runtime/scheduler";
+import type { CtfStateStore } from "../../src/ctf/state/storage";
+import { createRootedStore } from "../../src/gjc-runtime/storage/rooted-store";
 
 const roots: string[] = [];
 const digest = sha256Hex("campaign-fixture");
@@ -166,6 +168,104 @@ describe("durable CTF campaign", () => {
 		expect(result.stopped).toBe(true);
 		expect(result.runs).toEqual([]);
 		expect(invoked).toBe(false);
+		const stored = JSON.parse(await fs.readFile(path.join(root, "campaigns", "campaign-1.json"), "utf8")) as Record<
+			string,
+			unknown
+		>;
+		expect(stored.finalization).toMatchObject({
+			campaignId: "campaign-1",
+			competitionId: "competition-1",
+			stopAt: CTF_CAMPAIGN_HARD_STOP,
+		});
+	});
+	it("keeps a finalized receipt byte and digest idempotent on rerun", async () => {
+		setSystemTime(new Date(CTF_CAMPAIGN_HARD_STOP));
+		const { root, corpus } = await fixture();
+		let calls = 0;
+		const backend: CtfSolverBackend = {
+			id: "fixture-backend",
+			solve: async () => {
+				calls += 1;
+				return { status: "candidate" };
+			},
+		};
+		const first = await runCtfCampaign(options(root, corpus, backend, 1));
+		const target = path.join(root, "campaigns", "campaign-1.json");
+		const bytes = await fs.readFile(target, "utf8");
+		const anchor = path.join(root, "campaigns", "campaign-1.finalization.json");
+		const anchorBytes = await fs.readFile(anchor, "utf8");
+		const resumed = await runCtfCampaign(options(root, corpus, backend, 1));
+		expect(resumed.state.stateDigest).toBe(first.state.stateDigest);
+		expect(await fs.readFile(target, "utf8")).toBe(bytes);
+		expect(await fs.readFile(anchor, "utf8")).toBe(anchorBytes);
+		expect(calls).toBe(0);
+	});
+	it("recovers a first-run anchor-first finalization write using the exact anchored receipt", async () => {
+		setSystemTime(new Date(CTF_CAMPAIGN_HARD_STOP));
+		const { root, corpus } = await fixture();
+		const backing = createRootedStore(root);
+		let failStateWrite = true;
+		const store: CtfStateStore = {
+			root: backing.root,
+			resolve: target => backing.resolve(target),
+			writeJsonAtomic: (target, value, writeOptions) => {
+				if (
+					target === "campaigns/campaign-1.json" &&
+					failStateWrite &&
+					typeof value === "object" &&
+					value !== null &&
+					Object.hasOwn(value, "finalization")
+				) {
+					failStateWrite = false;
+					return Promise.reject(new Error("injected finalized state write failure"));
+				}
+				return backing.writeJsonAtomic(target, value, writeOptions);
+			},
+			appendJsonl: (target, value, writeOptions) => backing.appendJsonl(target, value, writeOptions),
+			withLock: (target, callback, lockOptions) => backing.withLock(target, callback, lockOptions),
+		};
+		const backend: CtfSolverBackend = { id: "fixture-backend", solve: async () => ({ status: "candidate" }) };
+		await expect(runCtfCampaign({ ...options(root, corpus, backend, 1), store })).rejects.toThrow(
+			/injected finalized state write failure/,
+		);
+		const anchorPath = path.join(root, "campaigns", "campaign-1.finalization.json");
+		const anchorBytes = await fs.readFile(anchorPath, "utf8");
+		const preFinalState = JSON.parse(
+			await fs.readFile(path.join(root, "campaigns", "campaign-1.json"), "utf8"),
+		) as Record<string, unknown>;
+		expect(preFinalState.finalization).toBeUndefined();
+		setSystemTime(new Date(Date.parse(CTF_CAMPAIGN_HARD_STOP) + 1));
+		const recovered = await runCtfCampaign({ ...options(root, corpus, backend, 1), store });
+		expect(recovered.state.finalization).toEqual(JSON.parse(anchorBytes));
+		expect(await fs.readFile(anchorPath, "utf8")).toBe(anchorBytes);
+	});
+
+	it("rejects an anchor whose pre-final state does not match the unfinalized state", async () => {
+		setSystemTime(new Date(CTF_CAMPAIGN_HARD_STOP));
+		const { root, corpus } = await fixture();
+		const backend: CtfSolverBackend = { id: "fixture-backend", solve: async () => ({ status: "candidate" }) };
+		await runCtfCampaign(options(root, corpus, backend, 1));
+		const target = path.join(root, "campaigns", "campaign-1.json");
+		const state = JSON.parse(await fs.readFile(target, "utf8")) as Record<string, unknown>;
+		delete state.finalization;
+		state.updatedAt = new Date(Date.parse(CTF_CAMPAIGN_HARD_STOP) + 1).toISOString();
+		const { stateDigest: _stateDigest, ...basis } = state;
+		state.stateDigest = canonicalDigest(basis);
+		await fs.writeFile(target, JSON.stringify(state), "utf8");
+		await expect(runCtfCampaign(options(root, corpus, backend, 1))).rejects.toMatchObject({
+			code: "integrity_error",
+		});
+	});
+	it("does not finalize early for a caller abort spoofing the deadline reason", async () => {
+		const { root, corpus } = await fixture();
+		const controller = new AbortController();
+		controller.abort("campaign deadline reached");
+		const backend: CtfSolverBackend = { id: "fixture-backend", solve: async () => ({ status: "candidate" }) };
+		const result = await runCtfCampaign(options(root, corpus, backend, 1, { signal: controller.signal }));
+		expect(result.stopped).toBe(false);
+		await expect(fs.stat(path.join(root, "campaigns", "campaign-1.finalization.json"))).rejects.toMatchObject({
+			code: "ENOENT",
+		});
 	});
 
 	it("races never-resolving materialization against the hard deadline", async () => {
@@ -174,6 +274,7 @@ describe("durable CTF campaign", () => {
 		let backendCalls = 0;
 		const started = Promise.withResolvers<void>();
 		let materializerSignal: AbortSignal | undefined;
+		let terminated = false;
 		const backend: CtfSolverBackend = {
 			id: "fixture-backend",
 			solve: async () => {
@@ -189,7 +290,14 @@ describe("durable CTF campaign", () => {
 						started.resolve();
 						return await new Promise<MaterializedCorpus>(() => {});
 					},
-					{ terminate: async () => {} },
+					{
+						terminate: async () => {
+							terminated = true;
+							await expect(fs.stat(path.join(root, "campaigns", "campaign-1.json"))).rejects.toMatchObject({
+								code: "ENOENT",
+							});
+						},
+					},
 				),
 			}),
 		);
@@ -202,6 +310,8 @@ describe("durable CTF campaign", () => {
 		expect(stopped.runs).toEqual([]);
 		expect(stopped.state.challenges[0]?.attempts).toEqual([]);
 		expect(stopped.stopped).toBe(true);
+		expect(terminated).toBe(true);
+		expect(stopped.state.finalization).toBeDefined();
 	});
 	it("waits for materializer termination acknowledgment and rejects its late artifact", async () => {
 		const { root, corpus } = await fixture();
@@ -295,6 +405,77 @@ describe("durable CTF campaign", () => {
 		expect(stopped.runs[0]?.status).toBe("cancelled");
 		expect(stopped.state.challenges[0]?.attempts[0]?.status).toBe("unknown");
 		expect(stopped.stopped).toBe(true);
+	});
+	it("rejects a forged finalization before the hard stop", async () => {
+		const { root, corpus } = await fixture();
+		const backend: CtfSolverBackend = { id: "fixture-backend", solve: async () => ({ status: "candidate" }) };
+		await runCtfCampaign(options(root, corpus, backend, 1));
+		const target = path.join(root, "campaigns", "campaign-1.json");
+		const state = JSON.parse(await fs.readFile(target, "utf8")) as Record<string, unknown>;
+		const { stateDigest: preFinalStateDigest } = state;
+		const finalizationBasis = {
+			schemaVersion: "ctf-campaign-finalization-1",
+			campaignId: "campaign-1",
+			competitionId: "competition-1",
+			stopAt: CTF_CAMPAIGN_HARD_STOP,
+			preFinalStateDigest,
+			challengeStateDigest: canonicalDigest(state.challenges),
+		};
+		state.finalization = {
+			...finalizationBasis,
+			finalizationDigest: canonicalDigest(finalizationBasis),
+		};
+		const { stateDigest: _stateDigest, ...basis } = state;
+		state.stateDigest = canonicalDigest(basis);
+		await fs.writeFile(target, JSON.stringify(state), "utf8");
+		await expect(runCtfCampaign(options(root, corpus, backend, 1))).rejects.toMatchObject({
+			code: "integrity_error",
+		});
+	});
+
+	it("rejects fully resealed finalization mutation that conflicts with its anchor", async () => {
+		setSystemTime(new Date(CTF_CAMPAIGN_HARD_STOP));
+		const { root, corpus } = await fixture();
+		const backend: CtfSolverBackend = { id: "fixture-backend", solve: async () => ({ status: "candidate" }) };
+		await runCtfCampaign(options(root, corpus, backend, 1));
+		const target = path.join(root, "campaigns", "campaign-1.json");
+		const state = JSON.parse(await fs.readFile(target, "utf8")) as Record<string, unknown>;
+		const challenges = state.challenges as Array<Record<string, unknown>>;
+		challenges[0]!.status = "failure";
+		const { finalization: _finalization, stateDigest: _stateDigest, ...preFinalBasis } = state;
+		const finalizationBasis = {
+			schemaVersion: "ctf-campaign-finalization-1",
+			campaignId: state.campaignId,
+			competitionId: state.competitionId,
+			stopAt: CTF_CAMPAIGN_HARD_STOP,
+			preFinalStateDigest: canonicalDigest(preFinalBasis),
+			challengeStateDigest: canonicalDigest(challenges),
+		};
+		state.finalization = {
+			...finalizationBasis,
+			finalizationDigest: canonicalDigest(finalizationBasis),
+		};
+		const { stateDigest: _recomputedStateDigest, ...basis } = state;
+		state.stateDigest = canonicalDigest(basis);
+		await fs.writeFile(target, JSON.stringify(state), "utf8");
+		await expect(runCtfCampaign(options(root, corpus, backend, 1))).rejects.toMatchObject({
+			code: "integrity_error",
+		});
+	});
+
+	it("rejects unknown fields before accepting a recomputed state digest", async () => {
+		const { root, corpus } = await fixture();
+		const backend: CtfSolverBackend = { id: "fixture-backend", solve: async () => ({ status: "candidate" }) };
+		await runCtfCampaign(options(root, corpus, backend, 1));
+		const target = path.join(root, "campaigns", "campaign-1.json");
+		const state = JSON.parse(await fs.readFile(target, "utf8")) as Record<string, unknown>;
+		state.unrecognized = true;
+		const { stateDigest: _stateDigest, ...basis } = state;
+		state.stateDigest = canonicalDigest(basis);
+		await fs.writeFile(target, JSON.stringify(state), "utf8");
+		await expect(runCtfCampaign(options(root, corpus, backend, 1))).rejects.toMatchObject({
+			code: "integrity_error",
+		});
 	});
 
 	it("rejects public frozen-clock bypass attempts", async () => {
