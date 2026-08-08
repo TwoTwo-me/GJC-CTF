@@ -14,6 +14,7 @@ import {
 	benchmarkEligibleChallengeIds,
 	benchmarkEligibleDenominator,
 	verifyBenchmarkOracleTransitionProof,
+	validateReviewedImplementationIdentity,
 	type BenchmarkEvaluatorCapability,
 	type BenchmarkOracleProofContext,
 } from "./manifest";
@@ -164,6 +165,7 @@ type BenchmarkMetricAuthority = Readonly<{
 	categories: ReadonlyMap<string, string>;
 	skill: SkillLockIdentity;
 	effectiveSkillDigest: Digest;
+	implementationIdentity: ReturnType<typeof validateReviewedImplementationIdentity>;
 	limits: OperationalLimitsV1;
 	safety: SafetyMaximaV1;
 	oracle: TrustedOracleRegistry;
@@ -184,7 +186,8 @@ function concreteBenchmarkAuthorities(
 	options: Record<string, unknown>,
 	manifest: BenchmarkManifestV1,
 	evaluatorCapability: BenchmarkEvaluatorCapability | undefined,
-): Pick<BenchmarkMetricAuthority, "skill" | "limits" | "safety" | "oracle"> & { effectiveSkillDigest: Digest } {
+): Pick<BenchmarkMetricAuthority, "skill" | "implementationIdentity" | "limits" | "safety" | "oracle"> & { effectiveSkillDigest: Digest } {
+	const implementationIdentity = validateReviewedImplementationIdentity(options.implementationIdentity, evaluatorCapability);
 	const rawSkill = options.effectiveSkill ?? options.skill;
 	if (rawSkill === undefined) {
 		rejectMetric("benchmark_provenance_missing", "scored benchmark runs require concrete effective skill identity");
@@ -240,7 +243,7 @@ function concreteBenchmarkAuthorities(
 	if (oracle.registry.registryDigest !== manifest.oracleRegistryDigest) {
 		rejectMetric("benchmark_lock_mismatch", "trusted oracle registry does not match the benchmark manifest");
 	}
-	return { skill, limits, safety, oracle, effectiveSkillDigest };
+	return { skill, implementationIdentity, limits, safety, oracle, effectiveSkillDigest };
 }
 function benchmarkMetricAuthority(
 	options: Record<string, unknown> | undefined,
@@ -888,6 +891,8 @@ export type BenchmarkReportRequest = Readonly<{
 	targetPassCount?: unknown;
 	floorPassCount?: unknown;
 	achievedPassCount?: unknown;
+	/** Stable implementation identity; external evaluator review is required for publication. */
+	implementationIdentity?: unknown;
 	preflightReportDigest?: unknown;
 	runtimeEvidenceDigest?: unknown;
 	evidenceRefs?: unknown;
@@ -966,6 +971,13 @@ export function evaluateBenchmarkReport(
 		}
 		const eligibleChallengeIds = authority.eligibleChallengeIds;
 		const report = validateMetricsReport(value.report);
+		const reportImplementationIdentity = validateReviewedImplementationIdentity(
+			report.implementationIdentity,
+			evaluatorCapability,
+		);
+		if (canonicalDigest(reportImplementationIdentity) !== canonicalDigest(authority.implementationIdentity)) {
+			return { status: "unavailable", reason: "benchmark report implementation identity does not match the scored request" };
+		}
 		if (
 			report.benchmarkId !== lock.benchmarkId ||
 			report.benchmarkLockDigest !== lock.lockDigest ||

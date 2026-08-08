@@ -291,6 +291,7 @@ type ScoredMetricFixture = Readonly<{
 		eligibleDenominator: number;
 		eligibleChallengeIds: readonly string[];
 		effectiveSkill: BenchmarkManifestV1["skill"];
+		implementationIdentity: BenchmarkImplementationIdentity;
 		operationalLimits: Record<string, unknown>;
 		safetyMaxima: Record<string, unknown>;
 		oracle: Record<string, unknown>;
@@ -430,6 +431,7 @@ function scoredMetricFixture(): ScoredMetricFixture {
 			eligibleDenominator: 1,
 			eligibleChallengeIds: ["challenge-1"],
 			effectiveSkill: skill,
+			implementationIdentity: implementationIdentity(),
 			operationalLimits: limits,
 			safetyMaxima: safety,
 			oracle: { trustedRegistry: trusted.trustedRegistry, trustAnchors: trusted.trustAnchors },
@@ -833,9 +835,11 @@ describe("benchmark contracts", () => {
 	});
 	it("accepts a valid signed run and rejects a forged per-run transition signature", () => {
 		const fixture = scoredMetricFixture();
-		const summary = summarizeMetricRuns([fixture.run], fixture.input, undefined, {
+		const capability = {
 			oracleTrustAnchors: fixture.trusted.trustAnchors,
-		});
+			reviewedImplementationIdentities: [implementationIdentity()],
+		};
+		const summary = summarizeMetricRuns([fixture.run], fixture.input, undefined, capability);
 		expect(summary.failureRuns).toBe(1);
 		const runtimeProof = fixture.run.runtimeProof;
 		if (runtimeProof === undefined) throw new Error("fixture runtime proof missing");
@@ -844,10 +848,7 @@ describe("benchmark contracts", () => {
 			runtimeProof: { ...runtimeProof, signature: "forged" },
 		};
 		expectCtfCode(
-			() =>
-				summarizeMetricRuns([forged], fixture.input, undefined, {
-					oracleTrustAnchors: fixture.trusted.trustAnchors,
-				}),
+			() => summarizeMetricRuns([forged], fixture.input, undefined, capability),
 			"oracle_integrity_error",
 		);
 	});
@@ -857,16 +858,104 @@ describe("benchmark contracts", () => {
 		expect(
 			summarizeMetricRuns([fixture.run], fixture.input, undefined, {
 				oracleTrustAnchors: fixture.trusted.trustAnchors,
+				reviewedImplementationIdentities: [implementationIdentity()],
 			}).failureRuns,
 		).toBe(1);
 	});
-	it("fails closed without external roots and accepts externally rooted scored preflight and reports", () => {
+	it("requires externally reviewed implementation identity for scored publication", () => {
 		const fixture = authorizedVersionStatsRequest();
-		const capability = { oracleTrustAnchors: fixture.oracle.trustAnchors };
-		expectCtfCode(() => preflightBenchmark(fixture), "oracle_integrity_error");
-		expect(() => preflightBenchmark(fixture, capability)).not.toThrow();
-		expect(evaluateBenchmarkReport(fixture).status).toBe("unavailable");
-		expect(evaluateBenchmarkReport(fixture, capability).status).toBe("ready");
+		const identity = implementationIdentity();
+		const { fingerprint: _fingerprint, ...unsignedReport } = fixture.report;
+		const report = {
+			...unsignedReport,
+			implementationIdentity: identity,
+		};
+		const request = {
+			...fixture,
+			implementationIdentity: identity,
+			report: { ...report, fingerprint: metricsFingerprint(report) },
+		};
+		const oracleOnlyCapability = { oracleTrustAnchors: fixture.oracle.trustAnchors };
+		const capability = {
+			...oracleOnlyCapability,
+			reviewedImplementationIdentities: [identity],
+		};
+
+		expectCtfCode(() => preflightBenchmark(request), "benchmark_provenance_missing");
+		expectCtfCode(() => preflightBenchmark(request, oracleOnlyCapability), "benchmark_provenance_missing");
+		expectCtfCode(
+			() => preflightBenchmark({ ...request, reviewedImplementationIdentities: [identity] }, oracleOnlyCapability),
+			"benchmark_provenance_missing",
+		);
+		expectCtfCode(
+			() =>
+				preflightBenchmark({ ...request, implementationIdentity: { ...identity, unexpected: DIGEST } }, capability),
+			"benchmark_provenance_missing",
+		);
+		expect(() => preflightBenchmark(request, capability)).not.toThrow();
+		expect(evaluateBenchmarkReport(request).status).toBe("unavailable");
+		expect(evaluateBenchmarkReport(request, oracleOnlyCapability).status).toBe("unavailable");
+		expect(evaluateBenchmarkReport(request, capability).status).toBe("ready");
+		expect(evaluateBenchmarkResult({ ...request, runs: request.report.runs }, capability).status).toBe("ready");
+
+		expectCtfCode(
+			() => preflightBenchmark({ ...request, safetyPolicyDigest: DIGEST }, capability),
+			"benchmark_provenance_missing",
+		);
+
+		const tamperedIdentity = {
+			...identity,
+			harnessBuildDigest: sha256Hex("tampered-harness-build"),
+		};
+		const tamperedReport = {
+			...unsignedReport,
+			implementationIdentity: tamperedIdentity,
+		};
+		expect(
+			evaluateBenchmarkReport(
+				{
+					...request,
+					report: { ...tamperedReport, fingerprint: metricsFingerprint(tamperedReport) },
+				},
+				capability,
+			).status,
+		).toBe("unavailable");
+		const mismatchCapability = {
+			...oracleOnlyCapability,
+			reviewedImplementationIdentities: [identity, tamperedIdentity],
+		};
+		expect(
+			evaluateBenchmarkReport(
+				{
+					...request,
+					report: { ...tamperedReport, fingerprint: metricsFingerprint(tamperedReport) },
+				},
+				mismatchCapability,
+			).status,
+		).toBe("unavailable");
+
+		const rebuiltManifestUnsigned = {
+			...fixture.manifest,
+			sourceCommit: "rebuilt-commit",
+		};
+		const rebuiltManifest = {
+			...rebuiltManifestUnsigned,
+			manifestDigest: benchmarkManifestDigest(rebuiltManifestUnsigned),
+		};
+		const rebuiltLock = createBenchmarkLock(rebuiltManifest);
+		expectCtfCode(
+			() =>
+				preflightBenchmark(
+					{
+						...request,
+						manifest: rebuiltManifest,
+						lock: rebuiltLock,
+						implementationIdentity: tamperedIdentity,
+					},
+					capability,
+				),
+			"benchmark_provenance_missing",
+		);
 	});
 	it("binds every challenge repeat to a canonical schedule, including colon IDs", () => {
 		expect(benchmarkRepeatSeed("bench:a", "challenge", 0)).not.toBe(benchmarkRepeatSeed("bench", "a:challenge", 0));

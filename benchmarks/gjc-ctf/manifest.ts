@@ -6,9 +6,11 @@ import {
 	benchmarkHoldoutDigest,
 	benchmarkLockDigest,
 	benchmarkManifestDigest,
+	BenchmarkImplementationIdentitySchema,
 	SkillLockIdentitySchema,
 	validateBenchmarkLock,
 	validateBenchmarkManifest,
+	type BenchmarkImplementationIdentity,
 	type BenchmarkLockV1,
 	type BenchmarkManifestV1,
 } from "../../packages/coding-agent/src/ctf/contracts/benchmark";
@@ -79,6 +81,8 @@ export type BenchmarkOracleProofContext = Readonly<{
 export type BenchmarkEvaluatorCapability = Readonly<{
 	/** Operator-owned roots supplied outside the benchmark evidence request. */
 	oracleTrustAnchors: OracleTrustAnchorsV1;
+	/** Externally reviewed implementation identities allowed for scored publication. */
+	reviewedImplementationIdentities?: readonly BenchmarkImplementationIdentity[];
 }>;
 
 export type BenchmarkPreflightRequest = Readonly<{
@@ -87,6 +91,8 @@ export type BenchmarkPreflightRequest = Readonly<{
 	calibration: BenchmarkCalibrationRef;
 	oracle: BenchmarkOracleRef;
 	safetyPolicyDigest: Digest;
+	/** Stable implementation identity; external evaluator review is required for scoring. */
+	implementationIdentity?: unknown;
 	/** Explicit count of non-holdout corpus entries; never inferred by scoring. */
 	eligibleDenominator?: number;
 	/** Numeric acceptance thresholds bound to the calibration digest. */
@@ -125,6 +131,27 @@ export type BenchmarkPreflight = Readonly<{
 
 function reject(code: "benchmark_provenance_missing" | "benchmark_lock_mismatch" | "uncalibrated_limits" | "oracle_integrity_error", message: string): never {
 	throw new CtfError(code, message);
+}
+export function validateReviewedImplementationIdentity(
+	value: unknown,
+	evaluatorCapability: BenchmarkEvaluatorCapability | undefined,
+): BenchmarkImplementationIdentity {
+	const identity = BenchmarkImplementationIdentitySchema.safeParse(value);
+	if (!identity.success) {
+		reject("benchmark_provenance_missing", "scored benchmark requires a valid implementation identity");
+	}
+	const reviewed = evaluatorCapability?.reviewedImplementationIdentities;
+	if (!Array.isArray(reviewed)) {
+		reject("benchmark_provenance_missing", "scored benchmark requires externally reviewed implementation identity authority");
+	}
+	for (const candidate of reviewed) {
+		const parsed = BenchmarkImplementationIdentitySchema.safeParse(candidate);
+		if (!parsed.success) {
+			reject("benchmark_provenance_missing", "external implementation identity authority is invalid");
+		}
+		if (canonicalDigest(parsed.data) === canonicalDigest(identity.data)) return identity.data;
+	}
+	reject("benchmark_provenance_missing", "implementation identity is not externally reviewed");
 }
 
 function freeze<T>(value: T): T {
@@ -571,6 +598,7 @@ export function preflightBenchmark(
 		reject("uncalibrated_limits", "benchmark calibration does not match the manifest");
 	}
 	validateBenchmarkConcreteLineage(request, manifest);
+	validateReviewedImplementationIdentity(request.implementationIdentity, evaluatorCapability);
 	const denominator = validateBenchmarkEligibleDenominator(manifest, calibration.eligibleDenominator);
 	const targetFloor = benchmarkTargetFloor(
 		calibration,
