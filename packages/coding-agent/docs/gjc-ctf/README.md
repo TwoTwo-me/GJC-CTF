@@ -40,17 +40,19 @@ The first bootstrap command is a dry-run audit. `--apply` requires at least one 
 
 ## Package installation and release assets
 
+Package launchers require Bun 1.3.14 or newer. Install through Bun so the runtime prerequisite is verified at installation time.
+
 The recommended unscoped package exposes the same command:
 
 ```sh
-npm install --global gajae-code
+bun install --global gajae-code
 gjc-ctf --help
 ```
 
 The scoped package also exposes it:
 
 ```sh
-npm install --global @gajae-code/coding-agent
+bun install --global @gajae-code/coding-agent
 gjc-ctf --help
 ```
 
