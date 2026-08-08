@@ -13,6 +13,7 @@ type SolverCategory = "misc" | "reverse" | "crypto" | "pwn" | "web";
 type EvaluationAdapterKind = "offline-checker" | "process-service" | "browser-session";
 type ThinkingLevel = "medium" | "high";
 type AnalyzerId = "endians" | "ooo-recurrence" | "regex-grid-z3" | "not-so-lazy-trigrams";
+export const REVIEWED_SOLVER_MODEL_IDENTITY = "openai-codex/gpt-5.6-sol" as const;
 
 export type SolverAttemptLimits = Readonly<{
 	wallClockMs: number;
@@ -132,7 +133,7 @@ export const LACTF_SOLVER_ROUTES: readonly SolverRoute[] = Object.freeze([
 		category: "misc",
 		adapterKind: "offline-checker",
 		analyzerIds: ["endians"],
-		modelPattern: "gpt-5",
+		modelPattern: REVIEWED_SOLVER_MODEL_IDENTITY,
 		thinkingLevel: "medium",
 		attemptLimits: { wallClockMs: 30_000, cpuTimeMs: 20_000, memoryMiB: 512 },
 	}),
@@ -141,7 +142,7 @@ export const LACTF_SOLVER_ROUTES: readonly SolverRoute[] = Object.freeze([
 		category: "reverse",
 		adapterKind: "offline-checker",
 		analyzerIds: ["ooo-recurrence"],
-		modelPattern: "gpt-5",
+		modelPattern: REVIEWED_SOLVER_MODEL_IDENTITY,
 		thinkingLevel: "high",
 		attemptLimits: { wallClockMs: 90_000, cpuTimeMs: 60_000, memoryMiB: 1_024 },
 	}),
@@ -150,7 +151,7 @@ export const LACTF_SOLVER_ROUTES: readonly SolverRoute[] = Object.freeze([
 		category: "reverse",
 		adapterKind: "offline-checker",
 		analyzerIds: ["regex-grid-z3"],
-		modelPattern: "gpt-5",
+		modelPattern: REVIEWED_SOLVER_MODEL_IDENTITY,
 		thinkingLevel: "high",
 		attemptLimits: { wallClockMs: 90_000, cpuTimeMs: 60_000, memoryMiB: 1_024 },
 	}),
@@ -159,7 +160,7 @@ export const LACTF_SOLVER_ROUTES: readonly SolverRoute[] = Object.freeze([
 		category: "crypto",
 		adapterKind: "offline-checker",
 		analyzerIds: ["not-so-lazy-trigrams"],
-		modelPattern: "gpt-5",
+		modelPattern: REVIEWED_SOLVER_MODEL_IDENTITY,
 		thinkingLevel: "high",
 		attemptLimits: { wallClockMs: 90_000, cpuTimeMs: 60_000, memoryMiB: 1_024 },
 	}),
@@ -168,7 +169,7 @@ export const LACTF_SOLVER_ROUTES: readonly SolverRoute[] = Object.freeze([
 		category: "pwn",
 		adapterKind: "process-service",
 		analyzerIds: [],
-		modelPattern: "gpt-5",
+		modelPattern: REVIEWED_SOLVER_MODEL_IDENTITY,
 		thinkingLevel: "high",
 		attemptLimits: { wallClockMs: 120_000, cpuTimeMs: 90_000, memoryMiB: 2_048 },
 	}),
@@ -177,7 +178,7 @@ export const LACTF_SOLVER_ROUTES: readonly SolverRoute[] = Object.freeze([
 		category: "web",
 		adapterKind: "browser-session",
 		analyzerIds: [],
-		modelPattern: "gpt-5",
+		modelPattern: REVIEWED_SOLVER_MODEL_IDENTITY,
 		thinkingLevel: "high",
 		attemptLimits: { wallClockMs: 120_000, cpuTimeMs: 90_000, memoryMiB: 2_048 },
 	}),
@@ -315,7 +316,7 @@ export function fixtureSolverRouteFor(challengeId: string): SolverRoute {
 		category: "misc",
 		adapterKind: "offline-checker",
 		analyzerIds: [],
-		modelPattern: "gpt-5",
+		modelPattern: REVIEWED_SOLVER_MODEL_IDENTITY,
 		thinkingLevel: "medium",
 		attemptLimits: { wallClockMs: 30_000, cpuTimeMs: 20_000, memoryMiB: 512 },
 	});

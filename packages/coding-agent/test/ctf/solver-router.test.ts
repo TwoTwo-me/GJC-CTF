@@ -43,6 +43,14 @@ describe("LA CTF solver route registry", () => {
 			["lactf-2026-pwn-tic-tac-no", "pwn", "process-service"],
 			["lactf-2026-web-single-trust", "web", "browser-session"],
 		]);
+		expect(LACTF_SOLVER_ROUTES.map(route => route.modelPattern)).toEqual([
+			"openai-codex/gpt-5.6-sol",
+			"openai-codex/gpt-5.6-sol",
+			"openai-codex/gpt-5.6-sol",
+			"openai-codex/gpt-5.6-sol",
+			"openai-codex/gpt-5.6-sol",
+			"openai-codex/gpt-5.6-sol",
+		]);
 		expect(solverRouteFor("lactf-2026-misc-endians").analyzerIds).toEqual(["endians"]);
 		expect(solverRouteFor("lactf-2026-rev-ooo").analyzerIds).toEqual(["ooo-recurrence"]);
 		expect(solverRouteFor("lactf-2026-rev-flag-finder").analyzerIds).toEqual(["regex-grid-z3"]);

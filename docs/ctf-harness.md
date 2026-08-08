@@ -65,6 +65,8 @@ The programmatic path is intentionally explicit:
 
 `createProductionGjcLocalSolverSessionFactory`, `createLocalCtfSolverBackend`, and `runCtfCampaign` are the main composition surfaces. Interactive providers are opt-in and route-bound; none is implicitly trusted by the stock CLI.
 
+Every reviewed route pins the exact model identity `openai-codex/gpt-5.6-sol`. An unavailable model or missing provider credential blocks the attempt; the harness never substitutes another provider under the same route digest. Changing this identity creates new route-registry and version evidence rather than rewriting historical statistics.
+
 ### Pwn diagnostics
 
 The Tic-Tac-No route exposes canonical base64 process I/O and a bounded in-memory ELF64/x86-64 inspector. ELF inspection reports headers, mitigations, and a capped set of printable strings; brace-shaped candidate material and flag-like file references are redacted before the model sees them. It does not execute the binary, recover a flag, verify a candidate, or count as a solve.
