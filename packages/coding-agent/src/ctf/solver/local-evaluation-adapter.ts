@@ -1,3 +1,4 @@
+import { assertBrowserSessionTarget } from "../runtime/adapters";
 import type { SolverAttemptLimits, SolverRoute } from "./router";
 
 const MAX_ACTIONS = 64;
@@ -19,6 +20,54 @@ export type LocalEvaluationRunBinding = Readonly<{
 	challengeId: string;
 	fencingToken: number;
 }>;
+declare const trustedBrowserFixtureAuthority: unique symbol;
+
+export type LocalBrowserFixtureAuthority = Readonly<{
+	challengeId: "lactf-2026-web-single-trust";
+	binding: LocalEvaluationRunBinding;
+	origin: string;
+	entryPath: string;
+	downloads: false;
+	rawCdp: false;
+	credentials: false;
+	serviceWorkers: false;
+	externalNetwork: false;
+	filesystemDisclosure: false;
+	readonly [trustedBrowserFixtureAuthority]: true;
+}>;
+
+const issuedBrowserFixtureAuthorities = new WeakSet<object>();
+const consumedBrowserFixtureAuthorities = new WeakSet<object>();
+
+function takeTrustedBrowserFixtureAuthority(
+	authority: LocalBrowserFixtureAuthority | undefined,
+	binding: LocalEvaluationRunBinding,
+): void {
+	if (authority === undefined)
+		throw new Error("local browser sessions are disabled pending reviewed network enforcement");
+	if (!issuedBrowserFixtureAuthorities.has(authority) || consumedBrowserFixtureAuthorities.has(authority))
+		throw new Error("local browser session fixture authority is not trusted");
+	if (
+		authority.challengeId !== "lactf-2026-web-single-trust" ||
+		authority.binding.competitionId !== binding.competitionId ||
+		authority.binding.runId !== binding.runId ||
+		authority.binding.challengeId !== binding.challengeId ||
+		authority.binding.fencingToken !== binding.fencingToken ||
+		authority.downloads !== false ||
+		authority.rawCdp !== false ||
+		authority.credentials !== false ||
+		authority.serviceWorkers !== false ||
+		authority.externalNetwork !== false ||
+		authority.filesystemDisclosure !== false
+	)
+		throw new Error("local browser session fixture authority is not trusted");
+	try {
+		assertBrowserSessionTarget(authority);
+	} catch {
+		throw new Error("local browser session fixture authority is not trusted");
+	}
+	consumedBrowserFixtureAuthorities.add(authority);
+}
 export type LocalEvaluationAdapterLifecycle = { close(): Promise<void> };
 export type LocalEvaluationAcquisition = Readonly<{
 	service: Promise<LocalProcessService | LocalBrowserSession>;
@@ -42,19 +91,10 @@ export type LocalBrowserSession = Readonly<{
 	action(action: LocalBrowserAction): Promise<void>;
 	close(): Promise<void>;
 	/**
-	 * The provider creates a fresh context with this origin and intercepts every
-	 * request type (including redirects, popups, websockets, and subresources).
+	 * This opaque, run-bound authority can only be issued by a future trusted
+	 * runtime browser driver. Structural lookalikes are rejected.
 	 */
-	networkAuthority: Readonly<{
-		origin: string;
-		intercepts: Readonly<{
-			navigation: true;
-			redirect: true;
-			popup: true;
-			websocket: true;
-			subresource: true;
-		}>;
-	}>;
+	fixtureAuthority?: LocalBrowserFixtureAuthority;
 	observation?: Readonly<{ status?: string; exitCode?: number }>;
 }>;
 
@@ -293,7 +333,21 @@ export async function openLocalEvaluationAdapter(
 				close,
 			});
 		}
-		throw new Error("local browser sessions are disabled pending reviewed network enforcement");
+		if (!("action" in service))
+			throw new Error("local evaluation adapter provider kind does not match the reviewed route");
+		takeTrustedBrowserFixtureAuthority((service as LocalBrowserSession).fixtureAuthority, binding);
+		return Object.freeze({
+			adapterKind: route.adapterKind,
+			observation: observationOf(service.observation),
+			browser: Object.freeze({
+				async action(action: LocalBrowserAction): Promise<void> {
+					const actionBytes = new TextEncoder().encode(JSON.stringify(action)).byteLength;
+					limits.assertAction(actionBytes);
+					await operation("browser action", () => (service as LocalBrowserSession).action(action));
+				},
+			}),
+			close,
+		});
 	} catch (error) {
 		controller.abort(error);
 		try {

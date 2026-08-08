@@ -49,7 +49,16 @@ export type ContainerServiceDriver = SecretDriver &
 			request: Readonly<{ imageDigest: string; origin: string; signal?: AbortSignal }>,
 		): OwnedDriverOperation<DriverHandle>;
 	}>;
-export type BrowserSessionTarget = Readonly<{ origin: string; entryPath: string; downloads: false; rawCdp: false }>;
+export type BrowserSessionTarget = Readonly<{
+	origin: string;
+	entryPath: string;
+	downloads: false;
+	rawCdp: false;
+	credentials: false;
+	serviceWorkers: false;
+	externalNetwork: false;
+	filesystemDisclosure: false;
+}>;
 export type BrowserSessionDriver = Readonly<{
 	start(
 		request: Readonly<{ browserDigest: string; target: BrowserSessionTarget; signal?: AbortSignal }>,
@@ -234,27 +243,54 @@ export function createContainerServiceAdapter(
 			),
 	};
 }
-/** This target has no download or CDP controls and can only name a confined loopback page. */
+/**
+ * This target names one canonical IPv4 loopback listener. Browser drivers must
+ * still intercept every request; this value never authorizes DNS or another
+ * origin.
+ */
 export function assertBrowserSessionTarget(
 	target: Readonly<Pick<BrowserSessionTarget, "origin" | "entryPath">>,
 ): BrowserSessionTarget {
-	const url = new URL(target.origin);
+	let url: URL;
+	try {
+		url = new URL(target.origin);
+	} catch {
+		throw new Error("browser origin must be a canonical exact loopback HTTP origin");
+	}
 	if (
 		url.protocol !== "http:" ||
-		(url.hostname !== "127.0.0.1" && url.hostname !== "localhost") ||
+		url.hostname !== "127.0.0.1" ||
+		url.port === "" ||
+		!Number.isSafeInteger(Number(url.port)) ||
+		Number(url.port) < 1 ||
+		Number(url.port) > 65_535 ||
+		url.username !== "" ||
+		url.password !== "" ||
 		url.pathname !== "/" ||
 		url.search !== "" ||
-		url.hash !== ""
+		url.hash !== "" ||
+		url.origin !== target.origin
 	)
-		throw new Error("browser origin must be a loopback HTTP origin");
+		throw new Error("browser origin must be a canonical exact loopback HTTP origin");
 	if (
 		!target.entryPath ||
 		target.entryPath.startsWith("/") ||
 		target.entryPath.includes("\\") ||
+		target.entryPath.includes("?") ||
+		target.entryPath.includes("#") ||
 		target.entryPath.split("/").includes("..")
 	)
 		throw new Error("browser entry path must be confined");
-	return Object.freeze({ origin: target.origin, entryPath: target.entryPath, downloads: false, rawCdp: false });
+	return Object.freeze({
+		origin: target.origin,
+		entryPath: target.entryPath,
+		downloads: false,
+		rawCdp: false,
+		credentials: false,
+		serviceWorkers: false,
+		externalNetwork: false,
+		filesystemDisclosure: false,
+	});
 }
 export function createBrowserSessionAdapter(
 	adapter: BrowserSessionAdapterV1,
