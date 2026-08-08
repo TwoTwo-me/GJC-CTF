@@ -125,6 +125,37 @@ describe("gjc-ctf stats inspect CLI surface", () => {
 			limitationsRecorded: expect.any(Number),
 		});
 	});
+	test("rejects substituted evidence bindings and invalid harness lineage before CLI inspection", async () => {
+		const current = validateLactfVersionStatisticsArtifact(await Bun.file(VERSION_OBSERVATION_PATH).json());
+		const invalidated = current.versions.find(version => version.status === "invalidated")!;
+		const harness = current.versions.find(version => version.status === "verified-harness-unscored")!;
+		const invalidation = (await Bun.file(
+			new URL("../../../../artifacts/ctf/lactf-expanded-v2-invalidation.json", import.meta.url).pathname,
+		).json()) as Record<string, unknown>;
+		expect(invalidated.evidenceDigest).toBe(canonicalDigest(invalidation));
+		expect(() =>
+			validateLactfVersionStatisticsArtifact({
+				...current,
+				versions: current.versions.map(version =>
+					version === invalidated ? { ...version, evidenceDigest: harness.evidenceDigest } : version,
+				),
+			}),
+		).toThrow(/content binding/u);
+		expect(() =>
+			validateLactfVersionStatisticsArtifact({
+				...current,
+				versions: current.versions.map(version =>
+					version === harness ? { ...version, supersedesObservationDigest: invalidated.evidenceDigest } : version,
+				),
+			}),
+		).toThrow(/one current harness.*supersedes/u);
+		expect(() =>
+			validateLactfVersionStatisticsArtifact({
+				...current,
+				versions: [...current.versions, { ...harness, versionId: "duplicate-current-harness" }],
+			}),
+		).toThrow(/one current harness/u);
+	});
 
 	test("renders only validated diagnostic observation fields as JSON or candidate-free text", async () => {
 		const text = await captureCliOutput(["stats", "inspect", "--input", VERSION_OBSERVATION_PATH]);
