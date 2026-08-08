@@ -199,6 +199,23 @@ export function solverRouteRegistryDigest(routes: readonly SolverRoute[] = LACTF
 }
 
 export const LACTF_SOLVER_ROUTE_REGISTRY_DIGEST = solverRouteRegistryDigest();
+const fixtureRoutes = new WeakSet<object>();
+const DIAGNOSTIC_RETRY_LIMITS = new Map<string, number>(LACTF_SOLVER_ROUTES.map(route => [route.challengeId, 1]));
+export const LACTF_DIAGNOSTIC_RETRY_POLICY_DIGEST = canonicalDigest(
+	LACTF_SOLVER_ROUTES.map(route => ({
+		challengeId: route.challengeId,
+		routeDigest: route.routeDigest,
+		diagnosticRetryLimit: DIAGNOSTIC_RETRY_LIMITS.get(route.challengeId),
+	})),
+);
+export function diagnosticRetryLimitFor(route: SolverRoute): number {
+	if (fixtureRoutes.has(route)) return 1;
+	const reviewed = validateSolverRoute(route);
+	const limit = DIAGNOSTIC_RETRY_LIMITS.get(reviewed.challengeId);
+	if (limit === undefined || !Number.isSafeInteger(limit) || limit < 0 || limit > 3)
+		fail("solver diagnostic retry policy is invalid");
+	return limit;
+}
 export const REVIEWED_SOLVER_ANALYZER_IDS: ReadonlySet<string> = new Set(
 	LACTF_SOLVER_ROUTES.flatMap(route => route.analyzerIds),
 );
@@ -293,7 +310,7 @@ export function solverRouteFor(challengeId: unknown): SolverRoute {
 /** Fixture-only compatibility route. Production callers must use solverRouteFor. */
 export function fixtureSolverRouteFor(challengeId: string): SolverRoute {
 	if (challengeId.length === 0) fail("fixture solver route challenge ID is invalid");
-	return createRoute({
+	const route = createRoute({
 		challengeId,
 		category: "misc",
 		adapterKind: "offline-checker",
@@ -302,6 +319,8 @@ export function fixtureSolverRouteFor(challengeId: string): SolverRoute {
 		thinkingLevel: "medium",
 		attemptLimits: { wallClockMs: 30_000, cpuTimeMs: 20_000, memoryMiB: 512 },
 	});
+	fixtureRoutes.add(route);
+	return route;
 }
 
 /** Returns declarative categories only; callers must separately use the reviewed bootstrap flow. */

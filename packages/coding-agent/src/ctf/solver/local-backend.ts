@@ -21,6 +21,7 @@ import {
 	openLocalEvaluationAdapter,
 } from "./local-evaluation-adapter";
 import {
+	diagnosticRetryLimitFor,
 	fixtureSolverRouteFor,
 	REVIEWED_SOLVER_ANALYZER_IDS,
 	type SolverAttemptLimits,
@@ -73,6 +74,11 @@ export type LocalSolverRunCapability = Readonly<{
 	readScratch(path: string): Promise<Uint8Array | undefined>;
 	publish(path: string, content: Uint8Array): Promise<void>;
 }>;
+export type LocalSolverRetryFeedback = Readonly<{
+	schemaVersion: "ctf-solver-feedback-1";
+	attempt: number;
+	code: "analyzers_not_applicable" | "empty_candidate";
+}>;
 export type LocalSolverSessionInput = Readonly<{
 	challengeId: string;
 	runId: string;
@@ -84,7 +90,9 @@ export type LocalSolverSessionInput = Readonly<{
 	modelPattern: string;
 	thinkingLevel: SolverRoute["thinkingLevel"];
 	attemptLimits: SolverAttemptLimits;
-	visibleFiles: readonly LocalSolverVisibleFile[];
+	visibleFiles: readonly { path: string; content: Uint8Array }[];
+	attempt: number;
+	retryFeedback?: LocalSolverRetryFeedback;
 	evaluationAdapter?: LocalEvaluationAdapter;
 	runCapability: LocalSolverRunCapability;
 	network: "off";
@@ -602,8 +610,7 @@ function createLocalCtfSolverBackendForRoutes(
 						return { status: "blocked", reason: "run artifact identity already exists" };
 					const visibleFiles = await readVisible(visibleRoot, descriptor, materialized.visibleFileDigests);
 					const toolProfile = Object.freeze([...allowedTools]);
-					const runCapability = createRunCapability();
-					const input: LocalSolverSessionInput = {
+					const inputBase: Omit<LocalSolverSessionInput, "attempt" | "retryFeedback" | "runCapability"> = {
 						challengeId: request.challengeId,
 						runId: request.runId,
 						routeDigest: route.routeDigest,
@@ -615,7 +622,6 @@ function createLocalCtfSolverBackendForRoutes(
 						thinkingLevel: route.thinkingLevel,
 						attemptLimits: route.attemptLimits,
 						visibleFiles,
-						runCapability: runCapability.capability,
 						network: "off",
 						credentials: "none",
 						allowedTools: toolProfile,
@@ -628,7 +634,6 @@ function createLocalCtfSolverBackendForRoutes(
 							return { status: "blocked", reason: `reviewed analyzer ${analyzerId} is not registered` };
 						selectedAnalyzers.push(analyzer);
 					}
-					let result: LocalSolverSessionResult | undefined;
 					const analyzerTerminationRequest = (): CtfRunTerminationRequest => ({
 						competitionId: request.authority.competitionId,
 						runId: request.runId,
@@ -637,73 +642,119 @@ function createLocalCtfSolverBackendForRoutes(
 						fencingToken: request.authority.fencingToken,
 						reason: "cancelled",
 					});
-					for (const analyzer of selectedAnalyzers) {
-						const lifecycle: unknown = analyzer.analyze(input);
-						if (!isLocalSolverAnalyzerLifecycle(lifecycle)) {
-							if (
-								lifecycle !== null &&
-								typeof lifecycle === "object" &&
-								"then" in lifecycle &&
-								typeof lifecycle.then === "function"
-							)
-								void Promise.resolve(lifecycle).catch(() => undefined);
-							throw new Error(`analyzer ${analyzer.id} lifecycle is invalid`);
-						}
-						const terminateAndQuiesce = async (): Promise<void> => {
-							const termination = await Promise.allSettled([
-								waitBounded(
-									Promise.resolve().then(() => lifecycle.terminate(analyzerTerminationRequest())),
-									run.quiescenceTimeoutMs,
-									`analyzer ${analyzer.id} termination`,
-								),
-							]);
-							const quiescence = await Promise.allSettled([
-								waitBounded(lifecycle.quiesced, run.quiescenceTimeoutMs, `analyzer ${analyzer.id} quiescence`),
-							]);
-							const failure = [...termination, ...quiescence].find(
-								(result): result is PromiseRejectedResult => result.status === "rejected",
-							);
-							if (failure !== undefined) throw failure.reason;
+					let result: LocalSolverSessionResult | undefined;
+					let successfulRunArtifacts: readonly LocalSolverArtifact[] = [];
+					let retryFeedback: LocalSolverRetryFeedback | undefined;
+					const diagnosticRetryLimit = diagnosticRetryLimitFor(route);
+					for (let attempt = 0; attempt <= diagnosticRetryLimit; attempt++) {
+						if (controller.signal.aborted)
+							return { status: "cancelled", reason: "run cancelled or budget exhausted" };
+						const attemptCapability = createRunCapability();
+						const input: LocalSolverSessionInput = {
+							...inputBase,
+							attempt,
+							...(retryFeedback === undefined ? {} : { retryFeedback }),
+							runCapability: attemptCapability.capability,
 						};
-						let analysis: LocalSolverAnalyzerResult | undefined;
-						try {
-							analysis = await awaitOrAbort(lifecycle.result, controller.signal);
-						} catch (error) {
-							await terminateAndQuiesce();
-							throw error;
-						}
-						if (analysis === undefined || controller.signal.aborted) {
-							await terminateAndQuiesce();
-							return { status: "cancelled", reason: "run cancelled or budget exhausted" };
-						}
-						try {
-							await waitBounded(
-								lifecycle.quiesced,
-								run.quiescenceTimeoutMs,
-								`analyzer ${analyzer.id} quiescence`,
-							);
-						} catch (error) {
-							await terminateAndQuiesce();
-							throw error;
-						}
-						if (controller.signal.aborted) {
-							await terminateAndQuiesce();
-							return { status: "cancelled", reason: "run cancelled or budget exhausted" };
-						}
-						if (analysis.status === "not-applicable") continue;
-						if (analysis.status === "cancelled")
-							return { status: "cancelled", reason: analysis.reason ?? "analyzer cancelled" };
-						if (analysis.status === "refused")
-							return {
-								status: "failed",
-								reason: `analyzer ${analyzer.id} refused: ${analysis.reason}`.slice(0, 256),
+						let analyzerResult: LocalSolverSessionResult | undefined;
+						for (const analyzer of selectedAnalyzers) {
+							const lifecycle: unknown = analyzer.analyze(input);
+							if (!isLocalSolverAnalyzerLifecycle(lifecycle)) {
+								if (
+									lifecycle !== null &&
+									typeof lifecycle === "object" &&
+									"then" in lifecycle &&
+									typeof lifecycle.then === "function"
+								)
+									void Promise.resolve(lifecycle).catch(() => undefined);
+								throw new Error(`analyzer ${analyzer.id} lifecycle is invalid`);
+							}
+							const terminateAndQuiesce = async (): Promise<void> => {
+								const termination = await Promise.allSettled([
+									waitBounded(
+										Promise.resolve().then(() => lifecycle.terminate(analyzerTerminationRequest())),
+										run.quiescenceTimeoutMs,
+										`analyzer ${analyzer.id} termination`,
+									),
+								]);
+								const quiescence = await Promise.allSettled([
+									waitBounded(
+										lifecycle.quiesced,
+										run.quiescenceTimeoutMs,
+										`analyzer ${analyzer.id} quiescence`,
+									),
+								]);
+								const failure = [...termination, ...quiescence].find(
+									(result): result is PromiseRejectedResult => result.status === "rejected",
+								);
+								if (failure !== undefined) throw failure.reason;
 							};
-						result = analysis.result;
-						break;
-					}
-					if (controller.signal.aborted)
-						return { status: "cancelled", reason: "run cancelled or budget exhausted" };
-					if (result === undefined) {
+							let analysis: LocalSolverAnalyzerResult | undefined;
+							try {
+								analysis = await awaitOrAbort(lifecycle.result, controller.signal);
+							} catch (error) {
+								await terminateAndQuiesce();
+								throw error;
+							}
+							if (analysis === undefined || controller.signal.aborted) {
+								await terminateAndQuiesce();
+								return { status: "cancelled", reason: "run cancelled or budget exhausted" };
+							}
+							try {
+								await waitBounded(
+									lifecycle.quiesced,
+									run.quiescenceTimeoutMs,
+									`analyzer ${analyzer.id} quiescence`,
+								);
+							} catch (error) {
+								await terminateAndQuiesce();
+								throw error;
+							}
+							if (controller.signal.aborted) {
+								await terminateAndQuiesce();
+								return { status: "cancelled", reason: "run cancelled or budget exhausted" };
+							}
+							if (analysis.status === "not-applicable") continue;
+							if (analysis.status === "cancelled")
+								return { status: "cancelled", reason: analysis.reason ?? "analyzer cancelled" };
+							if (analysis.status === "refused")
+								return {
+									status: "blocked",
+									terminalKind: "terminal_refusal",
+									reason: `analyzer ${analyzer.id} refused: ${analysis.reason}`.slice(0, 256),
+								};
+							analyzerResult = analysis.result;
+							break;
+						}
+						if (controller.signal.aborted)
+							return { status: "cancelled", reason: "run cancelled or budget exhausted" };
+						if (analyzerResult !== undefined) {
+							if (analyzerResult.candidate === undefined || analyzerResult.candidate.trim() === "") {
+								if (attempt === diagnosticRetryLimit)
+									return {
+										status: "failed",
+										terminalKind: "safe_exhaustion",
+										reason: "analyzer produced no candidate",
+									};
+								retryFeedback = {
+									schemaVersion: "ctf-solver-feedback-1",
+									attempt,
+									code: "empty_candidate",
+								};
+								continue;
+							}
+							result = analyzerResult;
+							successfulRunArtifacts = attemptCapability.artifacts;
+							break;
+						}
+						if (selectedAnalyzers.length > 0 && attempt < diagnosticRetryLimit) {
+							retryFeedback = {
+								schemaVersion: "ctf-solver-feedback-1",
+								attempt,
+								code: "analyzers_not_applicable",
+							};
+							continue;
+						}
 						if (route.adapterKind === "browser-session")
 							return { status: "blocked", reason: "browser-session routes are disabled" };
 						const matchingProviders = matchingLocalEvaluationProviders(adapterProviders, route);
@@ -716,6 +767,7 @@ function createLocalCtfSolverBackendForRoutes(
 										: "reviewed local evaluation adapter provider is registered more than once",
 							};
 						let evaluationAdapter: LocalEvaluationAdapter | undefined;
+						let sessionExhaustionReason: string | undefined;
 						try {
 							if (matchingProviders.length === 1) {
 								const acquisition: LocalEvaluationAdapterLifecycle = {
@@ -754,16 +806,7 @@ function createLocalCtfSolverBackendForRoutes(
 							run.sessionLifecycle = lifecycle;
 							const terminateSession = async (label: string): Promise<void> => {
 								await waitBounded(
-									Promise.resolve().then(() =>
-										lifecycle.terminate({
-											competitionId: request.authority.competitionId,
-											runId: request.runId,
-											challengeId: request.challengeId,
-											ownerId: request.runId,
-											fencingToken: request.authority.fencingToken,
-											reason: "cancelled",
-										}),
-									),
+									Promise.resolve().then(() => lifecycle.terminate(analyzerTerminationRequest())),
 									run.quiescenceTimeoutMs,
 									`session lifecycle termination ${label}`,
 								);
@@ -775,25 +818,7 @@ function createLocalCtfSolverBackendForRoutes(
 							};
 							const session = await awaitOrAbort(lifecycle.session, controller.signal);
 							if (session === undefined || controller.signal.aborted) {
-								await waitBounded(
-									Promise.resolve().then(() =>
-										lifecycle.terminate({
-											competitionId: request.authority.competitionId,
-											runId: request.runId,
-											challengeId: request.challengeId,
-											ownerId: request.runId,
-											fencingToken: request.authority.fencingToken,
-											reason: "cancelled",
-										}),
-									),
-									run.quiescenceTimeoutMs,
-									"session lifecycle termination after cancellation",
-								);
-								await waitBounded(
-									lifecycle.quiesced,
-									run.quiescenceTimeoutMs,
-									"session lifecycle quiescence after cancellation",
-								);
+								await terminateSession("after cancellation");
 								return { status: "cancelled", reason: "run cancelled or budget exhausted" };
 							}
 							let sessionResult: LocalSolverSessionResult;
@@ -815,7 +840,22 @@ function createLocalCtfSolverBackendForRoutes(
 								await terminateSession("after completion quiescence failure");
 								throw error;
 							}
-							result = sessionResult;
+							if (sessionResult.candidate === undefined || sessionResult.candidate.trim() === "") {
+								if (attempt === diagnosticRetryLimit) {
+									sessionExhaustionReason = "agent produced no candidate";
+								} else {
+									retryFeedback = {
+										schemaVersion: "ctf-solver-feedback-1",
+										attempt,
+										code: "empty_candidate",
+									};
+									continue;
+								}
+							} else {
+								result = sessionResult;
+								successfulRunArtifacts = attemptCapability.artifacts;
+								break;
+							}
 						} finally {
 							if (evaluationAdapter !== undefined)
 								await waitBounded(
@@ -824,7 +864,21 @@ function createLocalCtfSolverBackendForRoutes(
 									"evaluation adapter cleanup",
 								);
 						}
+						if (controller.signal.aborted)
+							return { status: "cancelled", reason: "run cancelled or budget exhausted" };
+						if (sessionExhaustionReason !== undefined)
+							return {
+								status: "failed",
+								terminalKind: "safe_exhaustion",
+								reason: sessionExhaustionReason,
+							};
 					}
+					if (result === undefined)
+						return {
+							status: "failed",
+							terminalKind: "safe_exhaustion",
+							reason: "solver diagnostic attempts exhausted",
+						};
 					if (controller.signal.aborted) {
 						const lifecycle = run.sessionLifecycle;
 						if (lifecycle !== undefined) {
@@ -851,7 +905,11 @@ function createLocalCtfSolverBackendForRoutes(
 						return { status: "cancelled", reason: "run cancelled or budget exhausted" };
 					}
 					if (result.candidate === undefined || result.candidate.trim() === "")
-						return { status: "failed", reason: "agent produced no candidate" };
+						return {
+							status: "failed",
+							terminalKind: "safe_exhaustion",
+							reason: "solver produced no candidate after diagnostic attempts",
+						};
 					const candidate = new TextEncoder().encode(result.candidate);
 					if (candidate.byteLength > MAX_ARTIFACT_BYTES)
 						return { status: "failed", reason: "candidate exceeds size bound" };
@@ -860,7 +918,7 @@ function createLocalCtfSolverBackendForRoutes(
 					const artifactEvidence = await writeArtifacts(verifiedArtifactRoot, request.runId, [
 						{ path: "candidate.txt", content: candidate },
 						...(result.artifacts ?? []),
-						...runCapability.artifacts,
+						...successfulRunArtifacts,
 					]);
 					if (controller.signal.aborted) {
 						await fs.rm(artifactPath, { recursive: true, force: true });

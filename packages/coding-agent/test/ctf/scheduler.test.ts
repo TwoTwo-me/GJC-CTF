@@ -85,6 +85,26 @@ describe("bounded CTF scheduler", () => {
 			reason: "backend_result_mismatch",
 		});
 	});
+	it("validates transient retry terminal kinds without expanding durable reasons", async () => {
+		const execute = (outcome: CtfSolverOutcome) =>
+			scheduleCtfRuns({
+				competitionId: "competition-1",
+				challengeIds: ["alpha"],
+				mode: "competition",
+				concurrency: 1,
+				backend: { id: "backend-1", solve: async () => outcome },
+				authority,
+				createUnavailable: unavailable,
+			});
+		const exhausted = await execute({ status: "failed", terminalKind: "safe_exhaustion" });
+		expect(exhausted.results[0]).toMatchObject({ status: "failed", reason: "solver_failed" });
+		expect(JSON.stringify(exhausted.results[0])).not.toContain("terminalKind");
+		const refused = await execute({ status: "blocked", terminalKind: "terminal_refusal" });
+		expect(refused.results[0]).toMatchObject({ status: "blocked", reason: "solver_failed" });
+		expect(JSON.stringify(refused.results[0])).not.toContain("terminalKind");
+		const invalid = await execute({ status: "blocked", terminalKind: "safe_exhaustion" });
+		expect(invalid.results[0]).toMatchObject({ status: "failed", reason: "backend_invalid_result" });
+	});
 
 	it("fails closed when run authority is missing", async () => {
 		const backend: CtfSolverBackend = { id: "backend-1", solve: async () => ({ status: "candidate" }) };

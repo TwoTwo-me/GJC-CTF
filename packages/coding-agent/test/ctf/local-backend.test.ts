@@ -74,30 +74,53 @@ describe("local GJC solver backend", () => {
 			analyzers: [
 				{
 					id: "not-so-lazy-trigrams",
-					analyze: () => analyzerLifecycle({ status: "not-applicable" }),
+					analyze: input =>
+						analyzerLifecycle(
+							(async () => {
+								if (input.attempt === 0) {
+									await input.runCapability.writeScratch("discarded-scratch.bin", Uint8Array.of(1));
+									await input.runCapability.publish("discarded.bin", Uint8Array.of(2));
+								}
+								return { status: "not-applicable" };
+							})(),
+						),
 				},
 			],
 			createSession: () =>
 				sessionLifecycle({
 					solve: async input => {
 						seen.push(input);
+						expect(await input.runCapability.readScratch("discarded-scratch.bin")).toBeUndefined();
+						await input.runCapability.publish("accepted.bin", Uint8Array.of(3));
 						return { candidate: "candidate-value" };
 					},
 				}),
 		});
 		await expect(backend.solve(request("lactf-2026-crypto-not-so-lazy-trigrams", root))).resolves.toMatchObject({
 			status: "candidate",
-			artifacts: ["run-1/candidate.txt"],
+			artifacts: ["run-1/candidate.txt", "run-1/accepted.bin"],
 			artifactEvidence: [
 				{
 					path: "run-1/candidate.txt",
 					digest: visibleDigest("candidate-value"),
 					size: Buffer.byteLength("candidate-value"),
 				},
+				{
+					path: "run-1/accepted.bin",
+					digest: sha256Hex(Uint8Array.of(3)),
+					size: 1,
+				},
 			],
 		});
 		expect(seen[0]?.visibleFiles.map(file => file.path)).toEqual(["answer.txt"]);
+		expect(seen[0]?.attempt).toBe(1);
+		expect(seen[0]?.retryFeedback).toEqual({
+			schemaVersion: "ctf-solver-feedback-1",
+			attempt: 0,
+			code: "analyzers_not_applicable",
+		});
 		expect(await fs.readFile(path.join(root, "artifacts/run-1/candidate.txt"), "utf8")).toBe("candidate-value");
+		await expect(fs.readFile(path.join(root, "artifacts/run-1/discarded.bin"))).rejects.toThrow();
 	});
 
 	it("runs reviewed analyzers before the agent and falls through only when no analyzer recognizes input", async () => {
@@ -570,6 +593,50 @@ describe("local GJC solver backend", () => {
 		expect(terminated).toBe(true);
 		await expect(fs.access(path.join(artifactRoot, "run-1"))).rejects.toThrow();
 	});
+	it("lets cancellation during adapter cleanup win before a diagnostic retry", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));
+		const artifactRoot = path.join(root, "artifacts");
+		await fs.mkdir(artifactRoot);
+		await fs.writeFile(path.join(root, "answer.txt"), "visible");
+		const controller = new AbortController();
+		const route = solverRouteFor("lactf-2026-pwn-tic-tac-no");
+		let sessionCreations = 0;
+		const backend = createLocalCtfSolverBackend({
+			root,
+			artifactRoot,
+			challenges: new Map([
+				[
+					"lactf-2026-pwn-tic-tac-no",
+					makeDescriptor({ id: "lactf-2026-pwn-tic-tac-no", visibleArtifactAllowlist: ["answer.txt"] }),
+				],
+			]),
+			adapterProviders: [
+				{
+					challengeId: route.challengeId,
+					routeDigest: route.routeDigest,
+					adapterKind: "process-service",
+					open: () => ({
+						service: Promise.resolve({
+							send: async () => {},
+							receive: async () => new Uint8Array(),
+							restart: async () => {},
+							close: async () => controller.abort("cancelled during adapter cleanup"),
+						}),
+						terminate: async () => {},
+					}),
+				},
+			],
+			createSession: () => {
+				sessionCreations++;
+				return sessionLifecycle({ solve: async () => ({ candidate: " " }) });
+			},
+		});
+
+		await expect(
+			backend.solve({ ...request("lactf-2026-pwn-tic-tac-no", root), signal: controller.signal }),
+		).resolves.toMatchObject({ status: "cancelled" });
+		expect(sessionCreations).toBe(1);
+	});
 	it("fails closed when evaluation adapter cleanup does not quiesce", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));
 		const artifactRoot = path.join(root, "artifacts");
@@ -666,9 +733,11 @@ describe("local GJC solver backend", () => {
 					return sessionLifecycle({ solve: async () => ({ candidate: "x" }) });
 				},
 			});
-			await expect(backend.solve(request("lactf-2026-misc-endians", root))).resolves.toMatchObject({
-				status: outcome.status === "refused" ? "failed" : "cancelled",
-			});
+			await expect(backend.solve(request("lactf-2026-misc-endians", root))).resolves.toMatchObject(
+				outcome.status === "refused"
+					? { status: "blocked", terminalKind: "terminal_refusal" }
+					: { status: "cancelled" },
+			);
 			expect(invoked).toBe(false);
 		}
 	});
@@ -1011,5 +1080,40 @@ describe("local GJC solver backend", () => {
 			}),
 		});
 		expect(result.results[0]).toMatchObject({ status: "cancelled" });
+	});
+	it("retries blank fixture candidates with structural feedback and safely exhausts", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-ctf-local-"));
+		const artifactRoot = path.join(root, "artifacts");
+		await fs.mkdir(artifactRoot);
+		await fs.writeFile(path.join(root, "answer.txt"), "visible");
+		const inputs: LocalSolverSessionInput[] = [];
+		const backend = createLocalCtfSolverFixtureBackend({
+			root,
+			artifactRoot,
+			challenges: new Map([
+				["challenge-1", makeDescriptor({ id: "challenge-1", visibleArtifactAllowlist: ["answer.txt"] })],
+			]),
+			createSession: async () => ({
+				solve: async input => {
+					inputs.push(input);
+					return { candidate: " " };
+				},
+			}),
+		});
+		await expect(backend.solve(request("challenge-1", root))).resolves.toMatchObject({
+			status: "failed",
+			terminalKind: "safe_exhaustion",
+		});
+		expect(inputs.map(input => ({ attempt: input.attempt, retryFeedback: input.retryFeedback }))).toEqual([
+			{ attempt: 0, retryFeedback: undefined },
+			{
+				attempt: 1,
+				retryFeedback: {
+					schemaVersion: "ctf-solver-feedback-1",
+					attempt: 0,
+					code: "empty_candidate",
+				},
+			},
+		]);
 	});
 });

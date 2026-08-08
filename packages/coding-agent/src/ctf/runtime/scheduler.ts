@@ -11,6 +11,8 @@ export type CtfArtifactEvidence = Readonly<{
 
 export type CtfSolverOutcome = Readonly<{
 	status: "candidate" | "failed" | "blocked" | "cancelled";
+	/** Classifies a completed solver terminal outcome without changing durable schemas. */
+	terminalKind?: "safe_exhaustion" | "terminal_refusal";
 	reason?: string;
 	artifacts?: readonly string[];
 	artifactEvidence?: readonly CtfArtifactEvidence[];
@@ -230,6 +232,15 @@ function normalizeSolverOutcome(value: unknown): CtfSolverOutcome {
 	if (!["candidate", "failed", "blocked", "cancelled"].includes(String(record.status))) {
 		return { status: "failed", reason: "solver backend returned an invalid result" };
 	}
+	if (
+		(record.terminalKind !== undefined &&
+			record.terminalKind !== "safe_exhaustion" &&
+			record.terminalKind !== "terminal_refusal") ||
+		(record.terminalKind === "safe_exhaustion" && record.status !== "failed") ||
+		(record.terminalKind === "terminal_refusal" && record.status !== "blocked")
+	) {
+		return { status: "failed", reason: "solver backend returned an invalid result" };
+	}
 	if (record.reason !== undefined && typeof record.reason !== "string") {
 		return { status: "failed", reason: "solver backend returned an invalid result" };
 	}
@@ -256,6 +267,9 @@ function normalizeSolverOutcome(value: unknown): CtfSolverOutcome {
 		return { status: "failed", reason: "solver backend artifact evidence does not match paths" };
 	return {
 		status: record.status as CtfSolverOutcome["status"],
+		...(record.terminalKind === undefined
+			? {}
+			: { terminalKind: record.terminalKind as NonNullable<CtfSolverOutcome["terminalKind"]> }),
 		...(record.reason === undefined ? {} : { reason: record.reason as string }),
 		...(artifacts === undefined ? {} : { artifacts }),
 		...(artifactEvidence === undefined ? {} : { artifactEvidence }),
@@ -265,6 +279,7 @@ function normalizeSolverOutcome(value: unknown): CtfSolverOutcome {
 }
 function durableReason(outcome: CtfSolverOutcome): CtfRunReason | undefined {
 	if (outcome.status === "candidate") return undefined;
+	if (outcome.terminalKind === "terminal_refusal") return "solver_failed";
 	if (outcome.status === "blocked") return "authority_unavailable";
 	if (outcome.status === "cancelled") return "cancelled";
 	if (outcome.reason === "solver backend returned invalid artifact evidence")
@@ -792,9 +807,10 @@ export async function scheduleCtfRuns(request: CtfBatchScheduleRequest): Promise
 					}
 				}
 				if (terminalError !== undefined) throw terminalError;
+				const { terminalKind: _terminalKind, ...durableOutcome } = outcome;
 				results[index] = {
 					schemaVersion: "ctf-run-result-1",
-					...outcome,
+					...durableOutcome,
 					runId,
 					competitionId: request.competitionId,
 					challengeId,
