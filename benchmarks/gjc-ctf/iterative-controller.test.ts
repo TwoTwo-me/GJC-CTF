@@ -13,6 +13,7 @@ import {
 	LACTF_ITERATION_LEDGER_PATH,
 	LactfIterativeController,
 } from "./iterative-controller";
+import { LACTF_REVOKED_EVIDENCE } from "./revoked-evidence";
 import { authorizedVersionStatsRequest } from "./test-authority-fixture";
 
 function campaignState(statuses: readonly CtfCampaignState["challenges"][number]["status"][]): CtfCampaignState {
@@ -111,6 +112,26 @@ describe("iterative LA CTF solver controller", () => {
 			const substituted = { ...unsigned, stateDigest: canonicalDigest(unsigned) } as CtfCampaignState;
 			await expect(controller.run({ campaignState: substituted })).rejects.toThrow(/immutable benchmark corpus/);
 			expect(await Bun.file(join(root, LACTF_ITERATION_LEDGER_PATH)).exists()).toBe(false);
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+	test("rejects revoked campaign digests before receipt persistence while admitting active digests", async () => {
+		const root = await mkdtemp(join(tmpdir(), "gjc-iterative-controller-"));
+		try {
+			const controller = new LactfIterativeController(root);
+			const activeCampaign = campaignState([]);
+			const revokedCampaign = {
+				...activeCampaign,
+				stateDigest: LACTF_REVOKED_EVIDENCE[0].digest,
+			};
+
+			await expect(controller.run({ campaignState: revokedCampaign })).rejects.toThrow(/invalidated/u);
+			expect(await Bun.file(join(root, LACTF_ITERATION_LEDGER_PATH)).exists()).toBe(false);
+
+			const decision = await controller.run({ campaignState: activeCampaign });
+			expect(decision.receipt.campaignStateDigest).toBe(activeCampaign.stateDigest);
+			expect(await controller.readReceipts()).toHaveLength(1);
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}

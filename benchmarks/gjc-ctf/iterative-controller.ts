@@ -24,6 +24,7 @@ import {
 	type LactfTierAuthoritySet,
 	type LactfTierState,
 } from "./tier-controller";
+import { assertLactfEvidenceActive } from "./revoked-evidence";
 
 export const LACTF_ITERATION_LEDGER_PATH = "benchmarks/gjc-ctf/iterations.jsonl" as const;
 
@@ -173,7 +174,9 @@ export class LactfIterativeController {
 	}
 
 	async run(input: LactfIterationInput): Promise<LactfIterationDecision> {
+		assertLactfEvidenceActive(input.campaignState.stateDigest);
 		const campaign = validateCampaignState(input.campaignState);
+		assertLactfEvidenceActive(campaign.stateDigest);
 		exactCampaign(campaign);
 		const before = await this.tierController.load();
 		const tierState = input.benchmarkReportRequest === undefined
@@ -199,13 +202,15 @@ export class LactfIterativeController {
 		const skillAction: LactfSkillAction = skillEvaluation?.status === "eligible"
 			? "promote-eligible-candidate"
 			: "retain-current-skill";
+		const campaignStateDigest = campaign.stateDigest;
 		const receipt = await this.store.withLock(this.receiptPath, async () => {
 			const receipts = await this.readReceipts();
 			const previous = receipts.at(-1)?.receiptDigest ?? null;
+			assertLactfEvidenceActive(campaignStateDigest);
 			const basis: Omit<LactfIterationReceipt, "receiptDigest"> = {
 				schemaVersion: "gjc-lactf-iteration-receipt-1",
 				sequence: receipts.length + 1,
-				campaignStateDigest: campaign.stateDigest,
+				campaignStateDigest,
 				tierStateDigest: tierState.stateDigest,
 				activeTier: tierState.activeTier,
 				action,
