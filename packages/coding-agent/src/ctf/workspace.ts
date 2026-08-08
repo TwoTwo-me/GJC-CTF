@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { ensureRootedArtifact, readRootedArtifact } from "@gajae-code/natives";
 import { withFileLock } from "../config/file-lock";
 import { createRootedStore, type RootedStore } from "../gjc-runtime/storage/rooted-store";
 import {
@@ -12,6 +13,7 @@ import {
 	DigestSchema,
 	digestsEqual,
 	type EventV1,
+	effectiveSkillDigest,
 	eventDigest,
 	eventPayloadDigest,
 	type ManifestV1,
@@ -26,10 +28,17 @@ import {
 	validateRegistrationTxn,
 } from "./contracts";
 import { type TrustedOracleRegistry, validateTrustedOracleRegistry } from "./runtime/oracle";
+import {
+	GENERATED_CTF_SKILL_ARTIFACT,
+	generatedCtfSkillArtifactRelativePath,
+	generatedCtfSkillInstalledIdentity,
+	loadCtfSkillIdentity,
+} from "./skills/identity-loader";
 
 export const CTF_MANIFEST_FILENAME = "gjc-ctf.manifest.json";
 export const CTF_STATE_DIRNAME = ".gjc-ctf";
 export const CTF_MANIFEST_SCHEMA = CTF_SCHEMA_VERSIONS.manifest;
+const CTF_INIT_RECEIPT_FILENAME = ".gjc-ctf-init.json";
 
 const COMPETITION_DIRNAME = "competition";
 const REGISTRATION_DIRNAME = "registration";
@@ -489,11 +498,152 @@ async function assertWorkspaceState(workspace: CtfWorkspace): Promise<void> {
 
 export type CtfWorkspaceInitOptions = { skill?: SkillRef };
 
+type GeneratedSkillPublication = {
+	skill: SkillRef;
+	path: string;
+	created: boolean;
+};
+
+function generatedSkillArtifactBytes(): Buffer {
+	return Buffer.from(`${JSON.stringify(GENERATED_CTF_SKILL_ARTIFACT)}\n`, "utf8");
+}
+
+function generatedSkillArtifactLocation(
+	root: string,
+	relativePath: string,
+): {
+	directories: string[];
+	leaf: string;
+	path: string;
+} {
+	const parts = relativePath.split("/");
+	if (parts.some(part => !part || part === "." || part === ".."))
+		throw new CtfWorkspaceError("integrity_error", "generated CTF skill artifact path is invalid");
+	const leaf = parts.at(-1);
+	if (leaf === undefined)
+		throw new CtfWorkspaceError("integrity_error", "generated CTF skill artifact path is invalid");
+	return { directories: parts.slice(0, -1), leaf, path: path.join(root, ...parts) };
+}
+
+async function publishGeneratedSkillArtifact(root: string): Promise<GeneratedSkillPublication> {
+	const installed = generatedCtfSkillInstalledIdentity();
+	const digest = effectiveSkillDigest(installed);
+	const relativePath = generatedCtfSkillArtifactRelativePath(digest);
+	const location = generatedSkillArtifactLocation(root, relativePath);
+	const bytes = generatedSkillArtifactBytes();
+	const publication = ensureRootedArtifact(root, location.directories, location.leaf, bytes, bytes.byteLength);
+	if (!publication.ok) {
+		throw new CtfWorkspaceError(
+			"integrity_error",
+			`generated CTF skill artifact publication failed: ${publication.code ?? "unknown"}`,
+		);
+	}
+	if (!publication.created && (publication.bytes === undefined || !Buffer.from(publication.bytes).equals(bytes))) {
+		throw new CtfWorkspaceError("integrity_error", "generated CTF skill artifact conflicts with this binary");
+	}
+	const resolved = await loadCtfSkillIdentity({
+		competitionRoot: root,
+		expected: { id: installed.id, version: installed.version, digest },
+	});
+	return {
+		skill: { id: resolved.id, version: resolved.version, digest: effectiveSkillDigest(resolved) },
+		path: location.path,
+		created: publication.created,
+	};
+}
+
+type GeneratedInitReceipt = {
+	schemaVersion: "ctf-init-receipt-1";
+	manifest: ManifestV1;
+};
+
+function generatedSkillRef(): SkillRef {
+	const installed = generatedCtfSkillInstalledIdentity();
+	return { id: installed.id, version: installed.version, digest: effectiveSkillDigest(installed) };
+}
+
+function assertGeneratedInitManifest(value: unknown): ManifestV1 {
+	const manifest = validateContractManifest(value);
+	const expectedSkill = generatedSkillRef();
+	if (
+		manifest.manifestRevision !== 1 ||
+		manifest.challenges.length !== 0 ||
+		manifest.skill.id !== expectedSkill.id ||
+		manifest.skill.version !== expectedSkill.version ||
+		!digestsEqual(manifest.skill.digest, expectedSkill.digest)
+	) {
+		throw new CtfWorkspaceError("integrity_error", "CTF init receipt does not bind the current generated skill");
+	}
+	return manifest;
+}
+
+function generatedInitReceiptBytes(manifest: ManifestV1): Buffer {
+	return jsonBytes({ schemaVersion: "ctf-init-receipt-1", manifest } satisfies GeneratedInitReceipt);
+}
+
+function parseGeneratedInitReceipt(bytes: Uint8Array): GeneratedInitReceipt {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(Buffer.from(bytes).toString("utf8"));
+	} catch {
+		throw new CtfWorkspaceError("integrity_error", "CTF init receipt JSON is invalid");
+	}
+	if (
+		!isObject(parsed) ||
+		parsed.schemaVersion !== "ctf-init-receipt-1" ||
+		Object.keys(parsed).sort().join(",") !== "manifest,schemaVersion"
+	) {
+		throw new CtfWorkspaceError("integrity_error", "CTF init receipt shape is invalid");
+	}
+	const manifest = assertGeneratedInitManifest(parsed.manifest);
+	const expected = generatedInitReceiptBytes(manifest);
+	if (!Buffer.from(bytes).equals(expected))
+		throw new CtfWorkspaceError("integrity_error", "CTF init receipt bytes are not canonical");
+	return { schemaVersion: "ctf-init-receipt-1", manifest };
+}
+
+function publishGeneratedInitReceipt(root: string, manifest: ManifestV1): boolean {
+	const bytes = generatedInitReceiptBytes(manifest);
+	const publication = ensureRootedArtifact(root, [], CTF_INIT_RECEIPT_FILENAME, bytes, bytes.byteLength);
+	if (!publication.ok)
+		throw new CtfWorkspaceError(
+			"integrity_error",
+			`CTF init receipt publication failed: ${publication.code ?? "unknown"}`,
+		);
+	if (!publication.created && (publication.bytes === undefined || !Buffer.from(publication.bytes).equals(bytes)))
+		throw new CtfWorkspaceError("integrity_error", "CTF init receipt conflicts with this initialization");
+	return publication.created;
+}
+
+function readGeneratedInitReceipt(root: string): GeneratedInitReceipt {
+	const result = readRootedArtifact(root, [], CTF_INIT_RECEIPT_FILENAME, 65_536);
+	if (!result.ok || result.bytes === undefined)
+		throw new CtfWorkspaceError("unmarked_directory", "Non-empty CTF root has no valid init receipt");
+	return parseGeneratedInitReceipt(result.bytes);
+}
+
+function initialEventHead(manifest: Pick<CtfManifest, "competitionId" | "manifestRevision">): Record<string, unknown> {
+	return {
+		schemaVersion: "ctf-event-head-1",
+		competitionId: manifest.competitionId,
+		revision: manifest.manifestRevision,
+		eventId: null,
+		eventDigest: ZERO_EVENT_DIGEST,
+	};
+}
+
 export async function initCtfWorkspace(
 	root = process.cwd(),
 	toolVersion = "0.0.0",
 	options: CtfWorkspaceInitOptions = {},
-): Promise<{ workspace: CtfWorkspace; created: boolean; noOp: boolean }> {
+): Promise<{
+	workspace: CtfWorkspace;
+	created: boolean;
+	noOp: boolean;
+	skill: SkillRef | undefined;
+	skillArtifactPath: string | undefined;
+	skillArtifactCreated: boolean;
+}> {
 	const resolvedRoot = path.resolve(root);
 	const manifestPath = path.join(resolvedRoot, CTF_MANIFEST_FILENAME);
 	return withFileLock(
@@ -503,7 +653,22 @@ export async function initCtfWorkspace(
 				const manifest = await readCtfManifest(resolvedRoot);
 				const workspace = workspaceFor(resolvedRoot, manifest);
 				await assertWorkspaceState(workspace);
-				return { workspace, created: false, noOp: true };
+				const expectedGeneratedSkill = generatedCtfSkillInstalledIdentity();
+				const generatedDigest = effectiveSkillDigest(expectedGeneratedSkill);
+				const publication =
+					manifest.skill?.id === expectedGeneratedSkill.id &&
+					manifest.skill.version === expectedGeneratedSkill.version &&
+					digestsEqual(manifest.skill.digest, generatedDigest)
+						? await publishGeneratedSkillArtifact(resolvedRoot)
+						: undefined;
+				return {
+					workspace,
+					created: false,
+					noOp: true,
+					skill: manifest.skill,
+					skillArtifactPath: publication?.path,
+					skillArtifactCreated: publication?.created ?? false,
+				};
 			}
 			let entries: string[];
 			try {
@@ -516,42 +681,71 @@ export async function initCtfWorkspace(
 						`Refusing to initialize non-directory path: ${resolvedRoot}`,
 					);
 			}
-			if (entries.length > 0) {
-				throw new CtfWorkspaceError(
-					"unmarked_directory",
-					`Refusing to initialize non-empty unmarked directory: ${resolvedRoot}`,
-				);
+			const recoveredReceipt =
+				entries.length === 0
+					? undefined
+					: options.skill === undefined
+						? readGeneratedInitReceipt(resolvedRoot)
+						: (() => {
+								throw new CtfWorkspaceError(
+									"unmarked_directory",
+									`Refusing to initialize non-empty unmarked directory: ${resolvedRoot}`,
+								);
+							})();
+			await fs.mkdir(resolvedRoot, { recursive: true });
+			let manifest: CtfManifest;
+			if (recoveredReceipt !== undefined) {
+				manifest = recoveredReceipt.manifest;
+			} else {
+				if (options.skill !== undefined) {
+					const parsedSkill = SkillRefSchema.safeParse(options.skill);
+					if (!parsedSkill.success)
+						throw new CtfWorkspaceError("invalid_manifest", "CTF skill identity is invalid");
+				}
+				const skill = options.skill ?? generatedSkillRef();
+				const base: Omit<CtfManifest, "manifestDigest"> = {
+					schemaVersion: CTF_MANIFEST_SCHEMA,
+					competitionId: randomUUID(),
+					manifestRevision: 1,
+					createdAt: new Date().toISOString(),
+					toolVersion,
+					skill,
+					challenges: [],
+				};
+				manifest = { ...base, manifestDigest: computeManifestDigest(base) };
 			}
-			if (options.skill !== undefined) {
-				const parsedSkill = SkillRefSchema.safeParse(options.skill);
-				if (!parsedSkill.success) throw new CtfWorkspaceError("invalid_manifest", "CTF skill identity is invalid");
+			let publication: GeneratedSkillPublication | undefined;
+			if (options.skill === undefined) {
+				const generatedManifest = assertGeneratedInitManifest(manifest);
+				publishGeneratedInitReceipt(resolvedRoot, generatedManifest);
+				publication = await publishGeneratedSkillArtifact(resolvedRoot);
+				if (
+					generatedManifest.skill.id !== publication.skill.id ||
+					generatedManifest.skill.version !== publication.skill.version ||
+					!digestsEqual(generatedManifest.skill.digest, publication.skill.digest)
+				) {
+					throw new CtfWorkspaceError("integrity_error", "CTF init receipt skill identity is inconsistent");
+				}
 			}
-			const base: Omit<CtfManifest, "manifestDigest"> = {
-				schemaVersion: CTF_MANIFEST_SCHEMA,
-				competitionId: randomUUID(),
-				manifestRevision: 1,
-				createdAt: new Date().toISOString(),
-				toolVersion,
-				...(options.skill ? { skill: options.skill } : {}),
-				challenges: [],
-			};
-			const manifest: CtfManifest = { ...base, manifestDigest: computeManifestDigest(base) };
 			const workspace = workspaceFor(resolvedRoot, manifest);
-			await workspace.stateStore.writeJsonAtomic(
-				stateStoreRelativePath(workspace, eventHeadPath(workspace)),
-				{
-					schemaVersion: "ctf-event-head-1",
-					competitionId: manifest.competitionId,
-					revision: manifest.manifestRevision,
-					eventId: null,
-					eventDigest: ZERO_EVENT_DIGEST,
-				},
-				{ durability: "ctf" },
+			await ensureEqualOrWrite(
+				eventHeadPath(workspace),
+				initialEventHead(manifest),
+				"integrity_error",
+				"initial CTF event head",
+				workspace,
 			);
 			// The manifest lives beside `.gjc-ctf`, so the rooted CTF state store cannot
 			// address it. This is the only direct atomic write retained for initialization.
 			await writeJsonAtomic(manifestPath, manifest);
-			return { workspace, created: true, noOp: false };
+			return {
+				workspace,
+				created: true,
+				noOp: false,
+				skill: manifest.skill,
+				skillArtifactPath: publication?.path,
+				skillArtifactCreated: publication?.created ?? false,
+			};
 		},
 	);
 }

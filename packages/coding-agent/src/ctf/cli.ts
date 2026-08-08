@@ -441,6 +441,9 @@ async function runCommand(command: CtfCommand, args: readonly string[], runtime:
 			created: result.created,
 			noOp: result.noOp,
 			manifestDigest: result.workspace.manifest.manifestDigest,
+			skill: result.skill,
+			skillArtifactPath: result.skillArtifactPath,
+			skillArtifactCreated: result.skillArtifactCreated,
 		};
 		if (wantsJson(args)) process.stdout.write(`${JSON.stringify(output)}\n`);
 		else

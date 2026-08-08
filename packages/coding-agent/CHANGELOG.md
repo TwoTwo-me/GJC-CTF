@@ -9,6 +9,7 @@
 - Added a reviewed, bounded Z3 regex-grid analyzer and ordered analyzer seam for local candidate campaigns; unsupported inputs fall through to the isolated AgentSession, while derived bitmaps remain unverified candidates.
 - Hardened CTF releases with a packaged immutable dashboard archive, compiled-binary dashboard smoke coverage, complete platform asset checks, source-pinned Windows bootstrap discovery, anchored split-key oracle authority, immutable corpus blob materialization, bounded authority cancellation, machine-readable evidence revocation, and identity-bound version statistics.
 - Added exact route-bound, bounded local process/browser adapter capabilities for dynamic CTF attempts and a read-only `gjc-ctf stats inspect` command for active candidate-free version observations.
+- `gjc-ctf init` now installs and binds its immutable competition-local CTF skill artifact automatically, using descriptor-relative fail-closed native publication instead of a global workflow skill or pathname fallback.
 
 ### Added
 

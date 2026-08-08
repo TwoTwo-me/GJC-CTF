@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added Linux descriptor-relative rooted artifact publication and exact reads with retained directory descriptors, anonymous-inode no-replace linking, symlink refusal, and explicit durability/error state for competition-local generated assets.
 
 ## [0.12.15] - 2026-08-06
 

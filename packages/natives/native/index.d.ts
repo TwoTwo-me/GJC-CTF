@@ -866,6 +866,22 @@ export declare enum Ellipsis {
 export declare function encodeSixel(bytes: Uint8Array, targetWidthPx: number, targetHeightPx: number): string
 
 /**
+ * Create fixed validated directories below a retained root and publish a
+ * regular-file leaf without replacement.
+ *
+ * Existing leaves are read from their one no-follow descriptor and returned
+ * for caller-side idempotence checks.
+ */
+export interface NativeRootedArtifactResult {
+	ok: boolean;
+	created: boolean;
+	bytes?: Uint8Array;
+	code?: string;
+}
+
+export declare function ensureRootedArtifact(root: string, directories: Array<string>, leaf: string, bytes: Uint8Array, maxBytes: number): NativeRootedArtifactResult
+
+/**
  * Remove a directory tree only when a fresh descriptor-relative snapshot
  * exactly equals the persisted snapshot. POSIX first no-replace detaches the
  * verified root to its deterministic `.removing` sibling; the reopened
@@ -2049,6 +2065,12 @@ export declare function ptyTimeoutCount(): bigint
  * Returns an error if clipboard access fails or image encoding fails.
  */
 export declare function readImageFromClipboard(): Promise<ClipboardImage | undefined | null>
+
+/**
+ * Read a fixed regular-file leaf below a retained root through exactly one
+ * no-follow descriptor. This never falls back to pathname validation.
+ */
+export declare function readRootedArtifact(root: string, directories: Array<string>, leaf: string, maxBytes: number): NativeRootedArtifactResult
 
 export interface RecoveryFsIdentity {
   dev: string

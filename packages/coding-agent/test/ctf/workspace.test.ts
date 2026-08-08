@@ -319,14 +319,15 @@ describe("CTF workspace authority", () => {
 		expect(updated.manifest.manifestRevision).toBe(2);
 	});
 
-	it("rejects descriptors without a skill identity instead of mutating manifest state", async () => {
+	it("binds the generated competition-local skill before challenge registration", async () => {
 		const root = await temporaryRoot();
 		const initialized = await initCtfWorkspace(root, "test-tool");
-		const descriptor = makeDescriptor("challenge-no-skill");
-		await expect(registerChallenge(initialized.workspace, descriptor)).rejects.toMatchObject({
-			code: "invalid_manifest",
-		});
-		expect((await readCtfManifest(root)).manifestRevision).toBe(1);
+		const descriptor = makeDescriptor("challenge-generated-skill");
+		const updated = await registerChallenge(initialized.workspace, descriptor, { mode: "unavailable" });
+		expect(initialized.workspace.manifest.skill).toBeDefined();
+		expect(updated.manifest.skill).toEqual(initialized.workspace.manifest.skill);
+		expect(updated.manifest.challenges[0]?.id).toBe(descriptor.id);
+		expect((await readCtfManifest(root)).manifestRevision).toBe(2);
 	});
 	it("rejects partial, blank, malformed, invalid, and identity-mismatched journal records before writing state", async () => {
 		const cases: Array<{

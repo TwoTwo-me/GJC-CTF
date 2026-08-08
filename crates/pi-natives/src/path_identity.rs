@@ -24,6 +24,79 @@ pub struct NativeBrokerPublicationOperation {
 	pub kind: String,
 }
 
+/// Result of publishing or reading a competition-local skill artifact.
+#[napi(object)]
+pub struct NativeRootedArtifactResult {
+	pub ok:      bool,
+	pub created: bool,
+	pub bytes:   Option<Uint8Array>,
+	pub code:    Option<String>,
+}
+
+#[cfg(unix)]
+fn rooted_artifact_result(
+	root: &str,
+	directories: &[String],
+	leaf: &str,
+	bytes: Option<&[u8]>,
+	max_bytes: u32,
+	publish: bool,
+) -> NativeRootedArtifactResult {
+	rooted_artifact::run(root, directories, leaf, bytes, max_bytes, publish)
+}
+
+#[cfg(not(unix))]
+fn rooted_artifact_result(
+	_root: &str,
+	_directories: &[String],
+	_leaf: &str,
+	_bytes: Option<&[u8]>,
+	_max_bytes: u32,
+	_publish: bool,
+) -> NativeRootedArtifactResult {
+	NativeRootedArtifactResult {
+		ok:      false,
+		created: false,
+		bytes:   None,
+		code:    Some("unsupported_platform".to_owned()),
+	}
+}
+
+/// Create fixed validated directories below a retained root and publish a
+/// regular-file leaf without replacement.
+///
+/// Existing leaves are read from their one no-follow descriptor and returned
+/// for caller-side idempotence checks.
+#[napi]
+pub fn ensure_rooted_artifact(
+	root: String,
+	directories: Vec<String>,
+	leaf: String,
+	bytes: Uint8Array,
+	max_bytes: u32,
+) -> NativeRootedArtifactResult {
+	if bytes.len() > usize::try_from(max_bytes).unwrap_or(usize::MAX) {
+		return NativeRootedArtifactResult {
+			ok:      false,
+			created: false,
+			bytes:   None,
+			code:    Some("too_large".to_owned()),
+		};
+	}
+	rooted_artifact_result(&root, &directories, &leaf, Some(&bytes), max_bytes, true)
+}
+
+/// Read a fixed regular-file leaf below a retained root through exactly one
+/// no-follow descriptor. This never falls back to pathname validation.
+#[napi]
+pub fn read_rooted_artifact(
+	root: String,
+	directories: Vec<String>,
+	leaf: String,
+	max_bytes: u32,
+) -> NativeRootedArtifactResult {
+	rooted_artifact_result(&root, &directories, &leaf, None, max_bytes, false)
+}
 /// Retained no-follow authority for the SDK publication namespace.
 #[napi]
 pub struct NativeRetainedBrokerPublication {
@@ -1279,6 +1352,265 @@ mod publication {
 
 		pub(super) fn sync(&self) -> String {
 			"ambiguous".to_owned()
+		}
+	}
+}
+#[cfg(target_os = "linux")]
+mod rooted_artifact {
+	use std::{
+		ffi::CString,
+		fs::File,
+		io::{Read, Write},
+		os::fd::{AsRawFd, FromRawFd},
+	};
+
+	use super::{NativeRootedArtifactResult, Uint8Array};
+
+	fn result(code: &'static str) -> NativeRootedArtifactResult {
+		NativeRootedArtifactResult {
+			ok:      false,
+			created: false,
+			bytes:   None,
+			code:    Some(code.to_owned()),
+		}
+	}
+
+	fn code(error: &std::io::Error) -> &'static str {
+		match error.raw_os_error() {
+			Some(libc::ELOOP | libc::ENOTDIR | libc::ENOENT) => "invalid_path",
+			Some(libc::EEXIST) => "conflict",
+			_ => "io_error",
+		}
+	}
+
+	fn component(value: &str) -> Option<CString> {
+		if value.is_empty()
+			|| matches!(value, "." | "..")
+			|| value.contains('/')
+			|| value.as_bytes().contains(&0)
+		{
+			return None;
+		}
+		CString::new(value).ok()
+	}
+
+	fn open_directory_at(parent: libc::c_int, name: &CString) -> std::io::Result<File> {
+		// SAFETY: `parent` is a live directory descriptor and `name` is NUL terminated.
+		let fd = unsafe {
+			libc::openat(
+				parent,
+				name.as_ptr(),
+				libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+			)
+		};
+		if fd < 0 {
+			Err(std::io::Error::last_os_error())
+		} else {
+			// SAFETY: `fd` was returned by openat and is uniquely owned here.
+			Ok(unsafe { File::from_raw_fd(fd) })
+		}
+	}
+
+	fn open_root(root: &str) -> std::io::Result<File> {
+		let root = CString::new(root).map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+		// SAFETY: `root` is NUL terminated.
+		let fd = unsafe {
+			libc::open(
+				root.as_ptr(),
+				libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+			)
+		};
+		if fd < 0 {
+			Err(std::io::Error::last_os_error())
+		} else {
+			// SAFETY: `fd` was returned by open and is uniquely owned here.
+			Ok(unsafe { File::from_raw_fd(fd) })
+		}
+	}
+
+	fn regular_file_at(parent: libc::c_int, name: &CString) -> Result<File, &'static str> {
+		// SAFETY: `parent` is live and `name` is NUL terminated.
+		let fd = unsafe {
+			libc::openat(parent, name.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+		};
+		if fd < 0 {
+			return Err(code(&std::io::Error::last_os_error()));
+		}
+		// SAFETY: fd is freshly returned by openat.
+		let file = unsafe { File::from_raw_fd(fd) };
+		let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+		// SAFETY: stat points to writable memory and file owns a live descriptor.
+		if unsafe { libc::fstat(file.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+			return Err(code(&std::io::Error::last_os_error()));
+		}
+		// SAFETY: fstat succeeded.
+		if unsafe { stat.assume_init().st_mode } & libc::S_IFMT != libc::S_IFREG {
+			return Err("conflict");
+		}
+		Ok(file)
+	}
+
+	fn read_exact(
+		parent: libc::c_int,
+		leaf: &CString,
+		max_bytes: u32,
+		establish_durability: bool,
+	) -> NativeRootedArtifactResult {
+		let mut file = match regular_file_at(parent, leaf) {
+			Ok(file) => file,
+			Err(code) => return result(code),
+		};
+		let limit = max_bytes as usize;
+		let mut bytes = Vec::with_capacity(limit.min(8192));
+		if Read::by_ref(&mut file)
+			.take((limit as u64).saturating_add(1))
+			.read_to_end(&mut bytes)
+			.is_err()
+		{
+			return result("io_error");
+		}
+		if bytes.len() > limit {
+			return result("too_large");
+		}
+		if establish_durability {
+			if file.sync_all().is_err() {
+				return result("io_error");
+			}
+			// SAFETY: parent is the retained final directory descriptor.
+			if unsafe { libc::fsync(parent) } != 0 {
+				return result("io_error");
+			}
+		}
+		NativeRootedArtifactResult {
+			ok:      true,
+			created: false,
+			bytes:   Some(Uint8Array::from(bytes)),
+			code:    None,
+		}
+	}
+	pub(super) fn run(
+		root: &str,
+		directories: &[String],
+		leaf: &str,
+		bytes: Option<&[u8]>,
+		max_bytes: u32,
+		publish: bool,
+	) -> NativeRootedArtifactResult {
+		let mut parent = match open_root(root) {
+			Ok(root) => root,
+			Err(error) => return result(code(&error)),
+		};
+		for raw in directories {
+			let Some(name) = component(raw) else {
+				return result("invalid_path");
+			};
+			match open_directory_at(parent.as_raw_fd(), &name) {
+				Ok(next) => parent = next,
+				Err(error) if error.raw_os_error() == Some(libc::ENOENT) && publish => {
+					// SAFETY: both descriptor and fixed validated component are retained here.
+					if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+						if std::io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) {
+							return result(code(&std::io::Error::last_os_error()));
+						}
+					} else if parent.sync_all().is_err() {
+						return result("io_error");
+					}
+					match open_directory_at(parent.as_raw_fd(), &name) {
+						Ok(next) => parent = next,
+						Err(error) => return result(code(&error)),
+					}
+				},
+				Err(error) => return result(code(&error)),
+			}
+		}
+		let Some(leaf) = component(leaf) else {
+			return result("invalid_path");
+		};
+		if !publish {
+			return read_exact(parent.as_raw_fd(), &leaf, max_bytes, false);
+		}
+		let bytes = bytes.expect("publish callers supply bytes");
+		if bytes.len() > max_bytes as usize {
+			return result("too_large");
+		}
+
+		let dot = CString::new(".").expect("literal has no NUL");
+		// SAFETY: the retained descriptor names the final parent and "." is a fixed
+		// component.
+		let temp_fd = unsafe {
+			libc::openat(
+				parent.as_raw_fd(),
+				dot.as_ptr(),
+				libc::O_TMPFILE | libc::O_WRONLY | libc::O_CLOEXEC,
+				0o600,
+			)
+		};
+		if temp_fd < 0 {
+			return result("temporary_file_unavailable");
+		}
+		// SAFETY: temp_fd is a new anonymous inode descriptor owned by this scope.
+		let mut temp_file = unsafe { File::from_raw_fd(temp_fd) };
+		if temp_file.write_all(bytes).is_err() || temp_file.sync_all().is_err() {
+			return result("io_error");
+		}
+		let Ok(descriptor_path) = CString::new(format!("/proc/self/fd/{}", temp_file.as_raw_fd()))
+		else {
+			return result("temporary_file_unavailable");
+		};
+		// SAFETY: procfs resolves this process-owned retained descriptor;
+		// AT_SYMLINK_FOLLOW dereferences that descriptor link while the destination
+		// remains relative to the retained parent. The anonymous inode has no
+		// attacker-controlled staging name.
+		let linked = unsafe {
+			libc::linkat(
+				libc::AT_FDCWD,
+				descriptor_path.as_ptr(),
+				parent.as_raw_fd(),
+				leaf.as_ptr(),
+				libc::AT_SYMLINK_FOLLOW,
+			)
+		};
+		if linked != 0 {
+			let error = std::io::Error::last_os_error();
+			if error.raw_os_error() == Some(libc::EEXIST) {
+				return read_exact(parent.as_raw_fd(), &leaf, max_bytes, true);
+			}
+			return result(match error.raw_os_error() {
+				Some(libc::EOPNOTSUPP | libc::ENOSYS | libc::EINVAL | libc::EPERM) => {
+					"temporary_file_unavailable"
+				},
+				_ => code(&error),
+			});
+		}
+		if parent.sync_all().is_err() {
+			return NativeRootedArtifactResult {
+				ok:      false,
+				created: true,
+				bytes:   None,
+				code:    Some("io_error".to_owned()),
+			};
+		}
+		NativeRootedArtifactResult { ok: true, created: true, bytes: None, code: None }
+	}
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+mod rooted_artifact {
+	use super::NativeRootedArtifactResult;
+
+	pub(super) fn run(
+		_root: &str,
+		_directories: &[String],
+		_leaf: &str,
+		_bytes: Option<&[u8]>,
+		_max_bytes: u32,
+		_publish: bool,
+	) -> NativeRootedArtifactResult {
+		NativeRootedArtifactResult {
+			ok:      false,
+			created: false,
+			bytes:   None,
+			code:    Some("temporary_file_unavailable".to_owned()),
 		}
 	}
 }

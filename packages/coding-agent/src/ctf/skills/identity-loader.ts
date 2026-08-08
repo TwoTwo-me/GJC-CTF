@@ -1,5 +1,6 @@
-import { readFile } from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { readRootedArtifact } from "@gajae-code/natives";
 import { parseFrontmatter } from "@gajae-code/utils";
 import { resolveRootedPath } from "../../gjc-runtime/storage/rooted-store";
 import {
@@ -22,6 +23,7 @@ export const CTF_SKILL_ID = "ctf";
 export const CTF_SKILL_VERSION = "1.1.0";
 export const CTF_SKILL_OVERRIDE_RELATIVE_PATH = `.gjc-ctf/skills/overrides/${CTF_SKILL_ID}/SKILL.md`;
 const CTF_SKILL_LEGACY_OVERRIDE_RELATIVE_PATH = `skills/${CTF_SKILL_ID}/SKILL.md`;
+export const CTF_GENERATED_SKILL_ARTIFACTS_RELATIVE_DIR = `.gjc-ctf/skills/artifacts/${CTF_SKILL_ID}/${CTF_SKILL_VERSION}`;
 
 /* Generated-loader inputs are content-addressed, so replacing the generated
  * file changes the loader/build identities instead of silently changing a run. */
@@ -77,6 +79,26 @@ function embeddedArtifact(): SkillArtifactV1 {
 }
 
 export const GENERATED_CTF_SKILL_ARTIFACT = embeddedArtifact();
+export function generatedCtfSkillArtifactRelativePath(installedEffectiveDigest: string): string {
+	if (!/^[a-f0-9]{64}$/.test(installedEffectiveDigest))
+		throw new CtfError("invalid_manifest", "generated CTF skill artifact digest is invalid");
+	return `${CTF_GENERATED_SKILL_ARTIFACTS_RELATIVE_DIR}/${installedEffectiveDigest}/artifact.json`;
+}
+
+export function generatedCtfSkillInstalledIdentity(): EffectiveSkillV1 {
+	const artifact = GENERATED_CTF_SKILL_ARTIFACT;
+	return validateEffectiveSkill({
+		schemaVersion: CTF_SCHEMA_VERSIONS.skill,
+		id: artifact.id,
+		version: artifact.version,
+		contentDigest: artifact.contentDigest,
+		loaderDigest: artifact.loaderDigest,
+		buildDigest: artifact.buildDigest,
+		workspaceOverrideDigest: artifact.contentDigest,
+		source: "workspace-override",
+		resolvedAt: CTF_SKILL_RESOLUTION_TIME,
+	});
+}
 function isUnsafeRelativePath(value: string): boolean {
 	return (
 		value.includes("\0") ||
@@ -104,7 +126,7 @@ async function readOverride(
 	const target = overrideTarget(root, relativePath);
 	let text: string;
 	try {
-		text = await readFile(target, "utf8");
+		text = await fs.readFile(target, "utf8");
 	} catch (error) {
 		if (typeof error === "object" && error !== null && (error as NodeJS.ErrnoException).code === "ENOENT")
 			return undefined;
@@ -133,6 +155,30 @@ async function readCompetitionOverride(
 	if (override !== undefined || overridePath !== undefined) return override;
 	// Legacy compatibility is consulted only when the canonical path is absent.
 	return readOverride(root, CTF_SKILL_LEGACY_OVERRIDE_RELATIVE_PATH);
+}
+async function readGeneratedArtifact(
+	root: string,
+	relativePath: string,
+): Promise<{ content: string; artifact?: SkillArtifactV1 } | undefined> {
+	const parts = relativePath.split("/");
+	const leaf = parts.at(-1);
+	if (leaf === undefined) throw new CtfError("integrity_error", "generated CTF skill artifact path is invalid");
+	const expectedText = `${JSON.stringify(GENERATED_CTF_SKILL_ARTIFACT)}\n`;
+	const result = readRootedArtifact(root, parts.slice(0, -1), leaf, Buffer.byteLength(expectedText));
+	if (!result.ok || result.bytes === undefined) {
+		throw new CtfError("integrity_error", `generated CTF skill artifact read failed: ${result.code ?? "unknown"}`);
+	}
+	const text = Buffer.from(result.bytes).toString("utf8");
+	if (text !== expectedText)
+		throw new CtfError("digest_mismatch", "generated CTF skill artifact does not match this binary");
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text);
+	} catch {
+		throw new CtfError("integrity_error", "generated CTF skill artifact JSON is invalid");
+	}
+	const artifact = validateSkillArtifact(parsed);
+	return { content: artifact.content, artifact };
 }
 
 function assertArtifactCompatibility(artifact: SkillArtifactV1, embedded: SkillArtifactV1): void {
@@ -176,8 +222,23 @@ export function createCtfSkillIdentityLoader(): CtfSkillIdentityLoader {
 		async load(options = {}) {
 			const embedded = GENERATED_CTF_SKILL_ARTIFACT;
 			const competitionRoot = options.competitionRoot ?? options.workspaceRoot;
+			const generatedInstalled = generatedCtfSkillInstalledIdentity();
+			const generatedInstalledDigest = effectiveSkillDigest(generatedInstalled);
+			const expectedRefMatchesGenerated =
+				options.expected?.id === CTF_SKILL_ID &&
+				options.expected.version === CTF_SKILL_VERSION &&
+				digestsEqual(options.expected.digest, generatedInstalledDigest);
+			const expectedEffectiveMatchesGenerated =
+				options.expectedEffective !== undefined &&
+				canonicalDigest(validateEffectiveSkill(options.expectedEffective)) === canonicalDigest(generatedInstalled);
+			const generatedArtifactPath =
+				options.overridePath === undefined && (expectedRefMatchesGenerated || expectedEffectiveMatchesGenerated)
+					? generatedCtfSkillArtifactRelativePath(generatedInstalledDigest)
+					: undefined;
 			const override = competitionRoot
-				? await readCompetitionOverride(competitionRoot, options.overridePath)
+				? generatedArtifactPath
+					? await readGeneratedArtifact(competitionRoot, generatedArtifactPath)
+					: await readCompetitionOverride(competitionRoot, options.overridePath)
 				: undefined;
 			if (options.expectedWorkspaceOverrideDigest !== undefined && override === undefined) {
 				throw new CtfError("digest_mismatch", "expected CTF workspace override is missing");

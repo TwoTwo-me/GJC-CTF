@@ -267,6 +267,21 @@ function applyPathIdentityTypes(dts: string): string {
 		);
 }
 
+function applyRootedArtifactType(dts: string): string {
+	const rootedArtifact = `export interface NativeRootedArtifactResult {
+	ok: boolean;
+	created: boolean;
+	bytes?: Uint8Array;
+	code?: string;
+}`;
+	return dts
+		.replace(/^export interface NativeRootedArtifactResult \{[\s\S]*?^\}\n*/m, "")
+		.replace(
+			/^export declare function ensureRootedArtifact/m,
+			`${rootedArtifact}\n\nexport declare function ensureRootedArtifact`,
+		);
+}
+
 function buildGeneratedBlock(dts: string): string {
 	const classes = [...new Set([...COMPATIBILITY_CLASSES, ...collectMatches(dts, CLASS_RE)])];
 	const functions = collectMatches(dts, FUNCTION_RE);
@@ -362,11 +377,13 @@ export async function generateEnumExports(): Promise<void> {
 	// Also fix the .d.ts: replace `const enum` with `enum` so TS allows
 	// assigning string literals to enum types without casts.
 	const constEnumCount = (generatedDts.match(/export (?:declare )?const enum/g) ?? []).length;
-	const dtsContent = patchCompatibilityDeclarations(
-		applyPathIdentityTypes(
-			generatedDts
-				.replaceAll("export const enum", "export declare enum")
-				.replaceAll("export declare const enum", "export declare enum"),
+	const dtsContent = applyRootedArtifactType(
+		patchCompatibilityDeclarations(
+			applyPathIdentityTypes(
+				generatedDts
+					.replaceAll("export const enum", "export declare enum")
+					.replaceAll("export declare const enum", "export declare enum"),
+			),
 		),
 	);
 	await Bun.write(dtsPath, dtsContent);
