@@ -122,21 +122,22 @@ describe("GJC local solver AgentSession adapter", () => {
 		expect(creations).toBe(0);
 	});
 
-	it("exposes only bounded process send, receive, and restart capabilities", async () => {
+	it("exposes strict canonical base64 process capabilities without sharing binary buffers", async () => {
 		let options: CreateAgentSessionOptions | undefined;
 		const calls: string[] = [];
-		let oversizedReceive = false;
+		const sent: Uint8Array[] = [];
+		const received = Uint8Array.from([0, 255, 1, 2]);
 		const processInput = {
 			...input("lactf-2026-pwn-tic-tac-no"),
 			evaluationAdapter: {
 				adapterKind: "process-service" as const,
 				process: {
 					send: async (content: Uint8Array) => {
-						calls.push(`send:${new TextDecoder().decode(content)}`);
+						sent.push(content);
 					},
 					receive: async () => {
 						calls.push("receive");
-						return oversizedReceive ? new Uint8Array(64 * 1024 + 1) : new TextEncoder().encode("service-output");
+						return received;
 					},
 					restart: async () => {
 						calls.push("restart");
@@ -157,18 +158,53 @@ describe("GJC local solver AgentSession adapter", () => {
 						getLastAssistantMessage: () => assistant('{"candidate":"candidate","notes":""}'),
 						prompt: async () => {
 							const tools = options?.customTools ?? [];
+							const send = tools[0] as any;
+							const receive = tools[1] as any;
+							const restart = tools[2] as any;
+							await expect(send.execute("send", { contentBase64: "" })).resolves.toMatchObject({
+								content: [{ text: "sent" }],
+							});
+							await expect(send.execute("send", { contentBase64: "AP8=" })).resolves.toMatchObject({
+								content: [{ text: "sent" }],
+							});
+							const allBytes = Uint8Array.from({ length: 256 }, (_, index) => index);
+							await send.execute("send", { contentBase64: Buffer.from(allBytes).toString("base64") });
+							const boundary = new Uint8Array(64 * 1024);
+							await send.execute("send", { contentBase64: Buffer.from(boundary).toString("base64") });
 							await expect(
-								(tools[0] as any).execute("send", { content: "x".repeat(64 * 1024 + 1) }),
-							).rejects.toThrow("character bound");
-							oversizedReceive = true;
-							await expect((tools[1] as any).execute("receive", {})).rejects.toThrow(
-								"receive exceeds byte bound",
+								send.execute("send", {
+									contentBase64: Buffer.from(new Uint8Array(64 * 1024 + 1)).toString("base64"),
+								}),
+							).rejects.toThrow("byte bound");
+							await expect(send.execute("send", { contentBase64: "AP8" })).rejects.toThrow(/canonical base64/);
+							await expect(send.execute("send", { contentBase64: "AP8=\n" })).rejects.toThrow(
+								/canonical base64/,
 							);
-							oversizedReceive = false;
-							await (tools[0] as any).execute("send", { content: "hello" });
-							const received = await (tools[1] as any).execute("receive", {});
-							expect(received.content[0]?.text).toBe("service-output");
-							await (tools[2] as any).execute("restart", {});
+							await expect(send.execute("send", { contentBase64: "AP_=" })).rejects.toThrow(/canonical base64/);
+							await expect(send.execute("send", { content: "AP8=" })).rejects.toThrow();
+							await expect(
+								send.execute("send", { contentBase64: "A".repeat(4 * Math.ceil((64 * 1024) / 3) + 1) }),
+							).rejects.toThrow(/base64 bound/);
+							const firstReceive = await receive.execute("receive", {});
+							expect(firstReceive.content[0]?.text).toBe("AP8BAg==");
+							received[0] = 42;
+							expect(firstReceive.content[0]?.text).toBe("AP8BAg==");
+							const receiveBoundary = new Uint8Array(64 * 1024);
+							processInput.evaluationAdapter.process.receive = async () => {
+								calls.push("receive");
+								return receiveBoundary;
+							};
+							const boundaryReceive = await receive.execute("receive", {});
+							expect(boundaryReceive.content[0]?.text).toHaveLength(4 * Math.ceil((64 * 1024) / 3));
+							receiveBoundary[0] = 42;
+							expect(boundaryReceive.content[0]?.text).not.toContain("Kg");
+							await expect(receive.execute("receive", { unexpected: true })).rejects.toThrow();
+							processInput.evaluationAdapter.process.receive = async () => {
+								calls.push("receive");
+								return new Uint8Array(64 * 1024 + 1);
+							};
+							await expect(receive.execute("receive", {})).rejects.toThrow("byte bound");
+							await restart.execute("restart", {});
 						},
 					},
 				};
@@ -178,11 +214,18 @@ describe("GJC local solver AgentSession adapter", () => {
 		await expect(session.solve(processInput)).resolves.toEqual({ candidate: "candidate", artifacts: [] });
 		expect(options?.toolNames).toEqual([]);
 		expect(options?.customTools?.map(tool => tool.name)).toEqual([
-			"ctf_process_send",
-			"ctf_process_receive",
+			"ctf_process_send_base64",
+			"ctf_process_receive_base64",
 			"ctf_process_restart",
 		]);
-		expect(calls).toEqual(["receive", "send:hello", "receive", "restart"]);
+		expect(sent.map(content => [...content])).toEqual([
+			[],
+			[0, 255],
+			[...Uint8Array.from({ length: 256 }, (_, index) => index)],
+			Array(64 * 1024).fill(0),
+		]);
+		expect(sent[1]).not.toBe(sent[2]);
+		expect(calls).toEqual(["receive", "receive", "receive", "restart"]);
 	});
 
 	it("fails closed for missing process adapters and leaves adapter cleanup to the backend", async () => {

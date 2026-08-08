@@ -20,10 +20,13 @@ const MAX_PROMPT_BYTES = 512 * 1024;
 const MAX_CANDIDATE_BYTES = 64 * 1024;
 const MAX_NOTES_BYTES = 8 * 1024;
 const MAX_PROCESS_ACTION_BYTES = 64 * 1024;
-const MAX_PROCESS_SEND_CHARS = 64 * 1024;
-const PROCESS_SEND_PARAMETERS = z.object({
-	content: z.string().max(MAX_PROCESS_SEND_CHARS, "local process send exceeds character bound"),
-});
+const MAX_PROCESS_BASE64_CHARS = 4 * Math.ceil(MAX_PROCESS_ACTION_BYTES / 3);
+const CANONICAL_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
+const PROCESS_SEND_PARAMETERS = z
+	.object({
+		contentBase64: z.string().max(MAX_PROCESS_BASE64_CHARS, "local process send exceeds base64 bound"),
+	})
+	.strict();
 
 const RESULT_SCHEMA = Object.freeze({
 	type: "object",
@@ -57,6 +60,22 @@ function boundedUtf8(value: string, maxBytes: number): string {
 	const bytes = new TextEncoder().encode(value);
 	if (bytes.byteLength <= maxBytes) return value;
 	return new TextDecoder().decode(bytes.slice(0, maxBytes));
+}
+function decodeCanonicalBase64(value: string): Uint8Array {
+	if (value.length > MAX_PROCESS_BASE64_CHARS) throw new Error("local process send exceeds base64 bound");
+	if (!CANONICAL_BASE64.test(value)) throw new Error("local process send is not canonical base64");
+	const decoded = Buffer.from(value, "base64");
+	if (decoded.byteLength > MAX_PROCESS_ACTION_BYTES) throw new Error("local process send exceeds byte bound");
+	if (decoded.toString("base64") !== value) throw new Error("local process send is not canonical base64");
+	return new Uint8Array(decoded);
+}
+
+function encodeCanonicalBase64(content: Uint8Array): string {
+	if (!(content instanceof Uint8Array) || content.byteLength > MAX_PROCESS_ACTION_BYTES)
+		throw new Error("local process receive exceeds byte bound");
+	const encoded = Buffer.from(content).toString("base64");
+	if (encoded.length > MAX_PROCESS_BASE64_CHARS) throw new Error("local process receive exceeds base64 bound");
+	return encoded;
 }
 
 function messageText(message: AssistantMessage | undefined): string {
@@ -149,34 +168,29 @@ function processTools(input: LocalSolverSessionInput): CustomTool[] {
 	};
 	return [
 		{
-			name: "ctf_process_send",
-			label: "CTF Process Send",
-			description: "Send UTF-8 input to the reviewed local process service.",
+			name: "ctf_process_send_base64",
+			label: "CTF Process Send Base64",
+			description: "Send canonical base64-decoded bytes to the reviewed local process service.",
 			parameters: PROCESS_SEND_PARAMETERS,
 			async execute(_toolCallId, params) {
 				assertActive();
 				const parsed = PROCESS_SEND_PARAMETERS.parse(params);
-				if (parsed.content.length > MAX_PROCESS_SEND_CHARS)
-					throw new Error("local process send exceeds character bound");
-				const content = new TextEncoder().encode(parsed.content);
-				if (content.byteLength > MAX_PROCESS_ACTION_BYTES) throw new Error("local process send exceeds byte bound");
-				await adapter.process.send(content);
+				await adapter.process.send(decodeCanonicalBase64(parsed.contentBase64));
 				assertActive();
 				return { content: [{ type: "text", text: "sent" }] };
 			},
 		},
 		{
-			name: "ctf_process_receive",
-			label: "CTF Process Receive",
-			description: "Receive bounded output from the reviewed local process service.",
-			parameters: z.object({}),
-			async execute() {
+			name: "ctf_process_receive_base64",
+			label: "CTF Process Receive Base64",
+			description: "Receive bounded local process output as canonical base64.",
+			parameters: z.object({}).strict(),
+			async execute(_toolCallId, params) {
 				assertActive();
+				z.object({}).strict().parse(params);
 				const content = await adapter.process.receive();
 				assertActive();
-				if (!(content instanceof Uint8Array) || content.byteLength > MAX_PROCESS_ACTION_BYTES)
-					throw new Error("local process receive exceeds byte bound");
-				return { content: [{ type: "text", text: new TextDecoder("utf-8", { fatal: false }).decode(content) }] };
+				return { content: [{ type: "text", text: encodeCanonicalBase64(content) }] };
 			},
 		},
 		{
