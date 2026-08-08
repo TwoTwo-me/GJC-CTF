@@ -370,7 +370,7 @@ describe("local evaluation lifecycle", () => {
 					verdict,
 					verifierVersion: "v1",
 					outputDigest: DIGEST,
-					sanitizedSummary: "ok",
+					sanitizedSummary: verdict,
 				};
 				return {
 					...unsigned,
@@ -440,7 +440,7 @@ describe("local evaluation lifecycle", () => {
 			verdict: "pass" as const,
 			verifierVersion: "v1",
 			outputDigest: DIGEST,
-			sanitizedSummary: "ok",
+			sanitizedSummary: "pass",
 		};
 		const validResult = {
 			...unsignedValidResult,

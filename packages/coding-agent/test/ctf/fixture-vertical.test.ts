@@ -76,7 +76,7 @@ function signedOracleAuthority(runId: string, challengeId: string, candidateDige
 		verdict: "pass" as const,
 		verifierVersion: "fixture-verifier-1",
 		outputDigest: EVIDENCE_DIGEST,
-		sanitizedSummary: "fixture pass",
+		sanitizedSummary: "pass",
 	};
 	const result = {
 		...unsignedResult,

@@ -5,8 +5,10 @@ import {
 	type OracleEntryV1,
 	type OracleRegistryV1,
 	type OracleResultV1,
+	type OracleSanitizedSummaryV1,
 	type TrustedOracleKeyV1,
 	type TrustedOracleRegistryV1,
+
 } from "../../../packages/coding-agent/src/ctf/contracts/oracle";
 import {
 	type OracleRequestIdentity,
@@ -49,9 +51,11 @@ function signCanonical(value: unknown, privateKey: KeyObject): string {
 
 function entryFor(
 	descriptor: LocalOracleDescriptor,
-	keyId: string,
+	registrySignerKeyId: string,
+	resultSignerKeyId: string,
 	privateKey: KeyObject,
 ): OracleEntryV1 {
+
 	const unsigned = {
 		schemaVersion: "ctf-oracle-entry-1" as const,
 		oracleId: descriptor.oracleId,
@@ -61,12 +65,35 @@ function entryFor(
 		artifactDigest: descriptor.artifactDigest,
 		backendDigest: descriptor.artifactDigest,
 		allowedChallengeIds: [descriptor.challengeId],
-		publicKeyId: keyId,
-		signerKeyId: keyId,
+		publicKeyId: resultSignerKeyId,
+		signerKeyId: registrySignerKeyId,
+
 		outputSchemaVersion: "ctf-oracle-result-1",
 	};
 	return Object.freeze({ ...unsigned, signature: signCanonical(unsigned, privateKey) });
 }
+function summaryFor(observation: LocalOracleObservation): OracleSanitizedSummaryV1 {
+	switch (observation.verdict) {
+		case "pass":
+			return "pass";
+		case "fail":
+			return "fail";
+		case "unavailable":
+			return "unavailable";
+	}
+}
+
+function resultVerdictFor(observation: LocalOracleObservation): OracleResultV1["verdict"] {
+	switch (observation.verdict) {
+		case "pass":
+			return "pass";
+		case "fail":
+			return "fail";
+		case "unavailable":
+			return "error";
+	}
+}
+
 
 /**
  * Creates an ephemeral local signing boundary for diagnostic evaluation. Its public
@@ -78,23 +105,40 @@ export function createEphemeralLocalOracleAuthority(
 	if (descriptors.length === 0 || new Set(descriptors.map(item => item.oracleId)).size !== descriptors.length) {
 		throw new Error("local oracle descriptors must be non-empty and unique");
 	}
-	const { privateKey, publicKey } = generateKeyPairSync("ed25519");
-	const publicKeyText = publicKey.export({ format: "der", type: "spki" }).toString("base64");
-	const keyId = "local-oracle-key-v1";
-	const key: TrustedOracleKeyV1 = Object.freeze({
-		keyId,
+	const registryKeyPair = generateKeyPairSync("ed25519");
+	const resultKeyPair = generateKeyPairSync("ed25519");
+	const registryPublicKey = registryKeyPair.publicKey.export({ format: "der", type: "spki" }).toString("base64");
+	const resultPublicKey = resultKeyPair.publicKey.export({ format: "der", type: "spki" }).toString("base64");
+	const registrySignerKeyId = "local-oracle-registry-signer-v1";
+	const resultSignerKeyId = "local-oracle-result-signer-v1";
+	const registrySignerKey: TrustedOracleKeyV1 = Object.freeze({
+		keyId: registrySignerKeyId,
 		algorithm: "ed25519",
-		publicKey: publicKeyText,
-		fingerprint: sha256Hex(publicKeyText),
+		publicKey: registryPublicKey,
+		fingerprint: sha256Hex(registryPublicKey),
 		active: true,
 	});
-	const entries = Object.freeze(descriptors.map(descriptor => entryFor(descriptor, keyId, privateKey)));
+	const resultSignerKey: TrustedOracleKeyV1 = Object.freeze({
+		keyId: resultSignerKeyId,
+		algorithm: "ed25519",
+		publicKey: resultPublicKey,
+		fingerprint: sha256Hex(resultPublicKey),
+		active: true,
+	});
+	const entries = Object.freeze(
+		descriptors.map(descriptor =>
+			entryFor(descriptor, registrySignerKeyId, resultSignerKeyId, registryKeyPair.privateKey),
+		),
+	);
 	const unsignedRegistry = { schemaVersion: "ctf-oracle-registry-1" as const, entries };
 	const registry: OracleRegistryV1 = Object.freeze({
 		...unsignedRegistry,
 		registryDigest: oracleRegistryDigest(unsignedRegistry),
 	});
-	const trustedRegistry: TrustedOracleRegistryV1 = Object.freeze({ registry, keys: Object.freeze([key]) });
+	const trustedRegistry: TrustedOracleRegistryV1 = Object.freeze({
+		registry,
+		keys: Object.freeze([registrySignerKey, resultSignerKey]),
+	});
 	return Object.freeze({
 		trustedRegistry,
 		signAndVerify(request: LocalOracleResultRequest): VerifiedOracleResult {
@@ -111,17 +155,15 @@ export function createEphemeralLocalOracleAuthority(
 				nonce: request.nonce,
 				candidateDigest: request.observation.candidateDigest,
 				inputDigest: request.observation.inputDigest,
-				verdict: request.observation.verdict === "pass" ? "pass" as const : request.observation.verdict === "fail" ? "fail" as const : "error" as const,
+				verdict: resultVerdictFor(request.observation),
 				verifierVersion: "gjc-ctf-local-oracle-v1",
 				outputDigest,
-				sanitizedSummary: request.observation.verdict === "pass"
-					? "candidate satisfied the source-bound local checker"
-					: "candidate did not satisfy the source-bound local checker",
+				sanitizedSummary: summaryFor(request.observation),
 				issuedAt: request.issuedAt,
 			};
 			const result: OracleResultV1 = Object.freeze({
 				...unsignedResult,
-				signature: signCanonical(unsignedResult, privateKey),
+				signature: signCanonical(unsignedResult, resultKeyPair.privateKey),
 			});
 			const expected: OracleRequestIdentity = {
 				runId: result.runId,

@@ -280,28 +280,40 @@ export async function evaluateLocalCandidate(request: LocalEvaluationRequest): P
 	try {
 		try {
 			if (!preflight.passed)
-				return complete(unavailable(spec.evaluationId, lineage, "preflight", "preflight_failed", "evaluation preflight failed"));
+				return complete(
+					unavailable(spec.evaluationId, lineage, "preflight", "preflight_failed", "evaluation preflight failed"),
+				);
 			if (
 				request.lineage.challengeId !== spec.challengeId ||
 				request.lineage.specDigest !== spec.specDigest ||
 				request.lineage.descriptorDigest !== spec.descriptorDigest ||
 				request.lineage.preflightDigest !== preflight.preflightDigest
 			)
-				return complete(unavailable(spec.evaluationId, lineage, "adapter", "not_available", "evaluation identity mismatch"));
+				return complete(
+					unavailable(spec.evaluationId, lineage, "adapter", "not_available", "evaluation identity mismatch"),
+				);
 			if (
 				request.adapters.length !== spec.adapters.length ||
 				new Set(request.adapters.map(adapter => adapter.adapterId)).size !== request.adapters.length
 			)
-				return complete(unavailable(spec.evaluationId, lineage, "adapter", "not_available", "adapter set is unavailable"));
+				return complete(
+					unavailable(spec.evaluationId, lineage, "adapter", "not_available", "adapter set is unavailable"),
+				);
 			const nonce = `nonce-${randomBytes(18).toString("base64url")}`;
 			for (const adapterSpec of spec.adapters) {
 				if (cancellationRequested(request.signal))
-					return complete(unavailable(spec.evaluationId, lineage, "adapter", "not_available", "evaluation cancelled"));
+					return complete(
+						unavailable(spec.evaluationId, lineage, "adapter", "not_available", "evaluation cancelled"),
+					);
 				const adapter = request.adapters.find(value => value.adapterId === adapterSpec.adapterId);
 				if (adapter === undefined || adapter.roles.join(",") !== adapterSpec.roles.join(","))
-					return complete(unavailable(spec.evaluationId, lineage, "adapter", "not_available", "adapter identity mismatch"));
+					return complete(
+						unavailable(spec.evaluationId, lineage, "adapter", "not_available", "adapter identity mismatch"),
+					);
 				const role =
-					adapterSpec.roles[0] === "service" || adapterSpec.roles[0] === "checker" ? adapterSpec.roles[0] : undefined;
+					adapterSpec.roles[0] === "service" || adapterSpec.roles[0] === "checker"
+						? adapterSpec.roles[0]
+						: undefined;
 				const session = await adapter.start({
 					runId: request.lineage.runId,
 					challengeId: spec.challengeId,
@@ -312,10 +324,14 @@ export async function evaluateLocalCandidate(request: LocalEvaluationRequest): P
 				});
 				sessions.push(session);
 				if (cancellationRequested(request.signal))
-					return complete(unavailable(spec.evaluationId, lineage, "adapter", "not_available", "evaluation cancelled"));
+					return complete(
+						unavailable(spec.evaluationId, lineage, "adapter", "not_available", "evaluation cancelled"),
+					);
 			}
 			if (cancellationRequested(request.signal))
-				return complete(unavailable(spec.evaluationId, lineage, "candidate", "not_available", "evaluation cancelled"));
+				return complete(
+					unavailable(spec.evaluationId, lineage, "candidate", "not_available", "evaluation cancelled"),
+				);
 			let candidate: CandidateSubmission;
 			try {
 				candidate = await request.collectCandidate({
@@ -338,7 +354,9 @@ export async function evaluateLocalCandidate(request: LocalEvaluationRequest): P
 				);
 			}
 			if (cancellationRequested(request.signal))
-				return complete(unavailable(spec.evaluationId, lineage, "candidate", "not_available", "evaluation cancelled"));
+				return complete(
+					unavailable(spec.evaluationId, lineage, "candidate", "not_available", "evaluation cancelled"),
+				);
 			const bytes =
 				candidate.encoding === spec.candidate.encoding
 					? candidateBytes(candidate, spec.candidate.maxBytes)
@@ -357,7 +375,9 @@ export async function evaluateLocalCandidate(request: LocalEvaluationRequest): P
 			lineage = buildLineage(request.lineage, candidateDigest, broker.commitment());
 			if (request.trustedOracle === undefined || request.requestOracle === undefined) {
 				if (cancellationRequested(request.signal))
-					return complete(unavailable(spec.evaluationId, lineage, "candidate", "not_available", "evaluation cancelled"));
+					return complete(
+						unavailable(spec.evaluationId, lineage, "candidate", "not_available", "evaluation cancelled"),
+					);
 				const unsigned = {
 					schemaVersion: "ctf-evaluation-result-1" as const,
 					kind: "candidate" as const,
@@ -376,7 +396,9 @@ export async function evaluateLocalCandidate(request: LocalEvaluationRequest): P
 					inputDigest: requireDigest(request.lineage.inputDigest, "evaluation input digest"),
 				});
 				if (cancellationRequested(request.signal))
-					return complete(unavailable(spec.evaluationId, lineage, "verification", "not_available", "evaluation cancelled"));
+					return complete(
+						unavailable(spec.evaluationId, lineage, "verification", "not_available", "evaluation cancelled"),
+					);
 				const verified = verifyTrustedOracleResult(request.trustedOracle, value, {
 					runId: request.lineage.runId,
 					challengeId: spec.challengeId,

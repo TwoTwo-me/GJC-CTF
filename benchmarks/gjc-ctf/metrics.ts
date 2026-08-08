@@ -46,7 +46,7 @@ import {
 	type SafetyMaximaV1,
 } from "../../packages/coding-agent/src/ctf/contracts/sandbox";
 import {
-	validateTrustedOracleRegistry,
+	validateAnchoredOracleRegistry,
 	verifyTrustedOracleResult,
 	type TrustedOracleRegistry,
 } from "../../packages/coding-agent/src/ctf/runtime/oracle";
@@ -231,10 +231,13 @@ function concreteBenchmarkAuthorities(
 	const registryInput = rawOracle && typeof rawOracle === "object" && !Array.isArray(rawOracle)
 		? ((rawOracle as Record<string, unknown>).trustedRegistry ?? (rawOracle as Record<string, unknown>).oracleRegistry ?? (rawOracle as Record<string, unknown>).registry ?? rawOracle)
 		: rawOracle;
-	if (registryInput === undefined) {
-		rejectMetric("benchmark_provenance_missing", "scored benchmark runs require a trusted oracle registry");
+	const trustAnchors = rawOracle && typeof rawOracle === "object" && !Array.isArray(rawOracle)
+		? (rawOracle as Record<string, unknown>).trustAnchors
+		: undefined;
+	if (registryInput === undefined || trustAnchors === undefined) {
+		rejectMetric("benchmark_provenance_missing", "scored benchmark runs require an externally anchored oracle registry");
 	}
-	const oracle = validateTrustedOracleRegistry(registryInput);
+	const oracle = validateAnchoredOracleRegistry(registryInput, trustAnchors);
 	if (oracle.registry.registryDigest !== manifest.oracleRegistryDigest) {
 		rejectMetric("benchmark_lock_mismatch", "trusted oracle registry does not match the benchmark manifest");
 	}

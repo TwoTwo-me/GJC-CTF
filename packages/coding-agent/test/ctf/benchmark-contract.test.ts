@@ -118,15 +118,22 @@ function makeManifest(
 }
 
 function trustedOracle(challengeId: string) {
-	const { privateKey, publicKey } = generateKeyPairSync("ed25519");
-	const publicKeyText = publicKey.export({ format: "der", type: "spki" }).toString("base64");
-	const key = {
-		keyId: "oracle-key-1",
-		algorithm: "ed25519" as const,
-		publicKey: publicKeyText,
-		fingerprint: sha256Hex(publicKeyText),
-		active: true,
+	const createPrincipal = (keyId: string) => {
+		const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+		const publicKeyText = publicKey.export({ format: "der", type: "spki" }).toString("base64");
+		return {
+			privateKey,
+			key: {
+				keyId,
+				algorithm: "ed25519" as const,
+				publicKey: publicKeyText,
+				fingerprint: sha256Hex(publicKeyText),
+				active: true,
+			},
+		};
 	};
+	const registryPrincipal = createPrincipal("oracle-registry-key-1");
+	const resultPrincipal = createPrincipal("oracle-result-key-1");
 	const unsignedEntry = {
 		schemaVersion: "ctf-oracle-entry-1" as const,
 		oracleId: "oracle-1",
@@ -135,20 +142,29 @@ function trustedOracle(challengeId: string) {
 		imageDigest: DIGEST,
 		artifactDigest: DIGEST,
 		allowedChallengeIds: [challengeId],
-		publicKeyId: key.keyId,
-		signerKeyId: key.keyId,
+		publicKeyId: resultPrincipal.key.keyId,
+		signerKeyId: registryPrincipal.key.keyId,
 		outputSchemaVersion: "ctf-oracle-result-1",
 	};
 	const entry = {
 		...unsignedEntry,
-		signature: sign(null, Buffer.from(canonicalJson(unsignedEntry)), privateKey).toString("base64"),
+		signature: sign(null, Buffer.from(canonicalJson(unsignedEntry)), registryPrincipal.privateKey).toString("base64"),
 	};
 	const registry = {
 		schemaVersion: "ctf-oracle-registry-1" as const,
 		entries: [entry],
 		registryDigest: oracleRegistryDigest({ schemaVersion: "ctf-oracle-registry-1", entries: [entry] }),
 	};
-	return { trustedRegistry: { registry, keys: [key] }, entry, privateKey };
+	return {
+		trustedRegistry: { registry, keys: [registryPrincipal.key, resultPrincipal.key] },
+		trustAnchors: {
+			registrySignerFingerprint: registryPrincipal.key.fingerprint,
+			resultSignerFingerprint: resultPrincipal.key.fingerprint,
+		},
+		entry,
+		registryPrincipal,
+		resultPrincipal,
+	};
 }
 function signedBenchmarkProof(
 	authority: "preflight" | "oracle",
@@ -171,7 +187,7 @@ function signedBenchmarkProof(
 			after: context.after,
 		}),
 		evidenceDigest: oracleEvidenceDigest(evidenceRefs),
-		signerKeyId: trusted.entry.publicKeyId,
+		signerKeyId: authority === "preflight" ? trusted.registryPrincipal.key.keyId : trusted.resultPrincipal.key.keyId,
 		signatureAlgorithm: "ed25519" as const,
 		signature: "unsigned",
 	};
@@ -186,7 +202,7 @@ function signedBenchmarkProof(
 				}),
 			),
 		),
-		trusted.privateKey,
+		authority === "preflight" ? trusted.registryPrincipal.privateKey : trusted.resultPrincipal.privateKey,
 	).toString("base64");
 	return { ...unsigned, signature };
 }
@@ -359,16 +375,17 @@ function scoredMetricFixture(): ScoredMetricFixture {
 		verdict: "fail" as const,
 		verifierVersion: "oracle-v1",
 		outputDigest: DIGEST,
-		sanitizedSummary: "failed",
+		sanitizedSummary: "fail" as const,
 	};
 	const result = {
 		...resultUnsigned,
-		signature: sign(null, Buffer.from(canonicalJson(resultUnsigned)), trusted.privateKey).toString("base64"),
+		signature: sign(null, Buffer.from(canonicalJson(resultUnsigned)), trusted.resultPrincipal.privateKey).toString(
+			"base64",
+		),
 	};
 	const runtimeDigest = oracleResultDigest(result);
 	const evidenceRefs = [DIGEST, runtimeDigest];
-	const key = trusted.trustedRegistry.keys[0];
-	if (key === undefined) throw new Error("fixture oracle key missing");
+	const key = trusted.resultPrincipal.key;
 	const run: MetricRunRecord = {
 		...metricRun({
 			runId,
@@ -401,7 +418,7 @@ function scoredMetricFixture(): ScoredMetricFixture {
 			effectiveSkill: skill,
 			operationalLimits: limits,
 			safetyMaxima: safety,
-			oracle: { trustedRegistry: trusted.trustedRegistry },
+			oracle: { trustedRegistry: trusted.trustedRegistry, trustAnchors: trusted.trustAnchors },
 		},
 		run,
 		context,
@@ -486,9 +503,7 @@ describe("benchmark contracts", () => {
 		const forgedUnsigned: Omit<MetricFixture, "fixtureDigest"> = {
 			...fixtureUnsigned,
 			runs: fixtureUnsigned.runs.map((run, index) =>
-				index === 0
-					? { ...run, seed: benchmarkRepeatSeed("forged-benchmark", "challenge-1", 0) }
-					: run,
+				index === 0 ? { ...run, seed: benchmarkRepeatSeed("forged-benchmark", "challenge-1", 0) } : run,
 			),
 		};
 		const forged = {

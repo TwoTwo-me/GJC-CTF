@@ -11,6 +11,7 @@ import {
 	validateOracleEntry,
 	validateOracleRegistry,
 	validateOracleResult,
+	validateOracleTrustAnchors,
 	validateTrustedOracleRegistryShape,
 } from "../contracts/oracle";
 export type TrustedOracleRegistry = TrustedOracleRegistryV1;
@@ -88,7 +89,7 @@ function keyById(keys: readonly TrustedOracleKeyV1[], keyId: string): TrustedOra
 	return key;
 }
 
-/** Validate registry integrity and signatures before any result can be trusted. */
+/** Validate registry integrity and signatures without assigning an authority root. */
 export function validateTrustedOracleRegistry(value: unknown): TrustedOracleRegistry {
 	const trusted = validateTrustedOracleRegistryShape(value);
 	const registry = validateOracleRegistry(trusted.registry);
@@ -108,11 +109,56 @@ export function validateTrustedOracleRegistry(value: unknown): TrustedOracleRegi
 	}
 	return { registry, keys: [...trusted.keys] };
 }
+/**
+ * Validate an authority against independently configured signer fingerprints.
+ * Unlike shape/signature validation, this cannot make a caller-provided key a root.
+ */
+export function validateAnchoredOracleRegistry(value: unknown, trustAnchors: unknown): TrustedOracleRegistry {
+	const anchors = validateOracleTrustAnchors(trustAnchors);
+	const trusted = validateTrustedOracleRegistry(value);
+	const activeKeys = trusted.keys.filter(key => key.active);
+	if (activeKeys.length !== 2) oracleFailure("anchored oracle registry must contain exactly two active keys");
+	const activeFingerprints = new Set(activeKeys.map(key => key.fingerprint));
+	if (
+		activeFingerprints.size !== 2 ||
+		!activeFingerprints.has(anchors.registrySignerFingerprint) ||
+		!activeFingerprints.has(anchors.resultSignerFingerprint)
+	) {
+		oracleFailure("anchored oracle registry active keys do not exactly match trust anchors");
+	}
+	for (const entry of trusted.registry.entries) {
+		const registrySigner = keyById(trusted.keys, entry.signerKeyId);
+		const resultSigner = keyById(trusted.keys, entry.publicKeyId);
+		if (registrySigner.fingerprint !== anchors.registrySignerFingerprint)
+			oracleFailure(`oracle entry registry signer does not match trust anchor: ${entry.oracleId}`);
+		if (resultSigner.fingerprint !== anchors.resultSignerFingerprint)
+			oracleFailure(`oracle entry result signer does not match trust anchor: ${entry.oracleId}`);
+		if (
+			registrySigner.keyId === resultSigner.keyId ||
+			registrySigner.publicKey === resultSigner.publicKey ||
+			registrySigner.fingerprint === resultSigner.fingerprint
+		)
+			oracleFailure(`oracle entry signer roles are not distinct: ${entry.oracleId}`);
+	}
+	return trusted;
+}
 
 /**
- * Verify an oracle result against the pinned registry, challenge allowlist,
- * request identity, and trusted Ed25519 signature.  There is no inferred
- * success path: callers only receive a value with `verified: true` here.
+ * Verify an oracle result using only an externally supplied exact trust-anchor set.
+ */
+export function verifyAnchoredOracleResult(
+	trusted: unknown,
+	trustAnchors: unknown,
+	value: unknown,
+	expected: OracleRequestIdentity,
+): VerifiedOracleResult {
+	const checked = validateAnchoredOracleRegistry(trusted, trustAnchors);
+	return verifyTrustedOracleResult(checked, value, expected);
+}
+
+/**
+ * Verify an oracle result against a caller-supplied registry. This validates shape
+ * and signatures only; it is non-authoritative without `verifyAnchoredOracleResult`.
  */
 export function verifyTrustedOracleResult(
 	trusted: TrustedOracleRegistry,

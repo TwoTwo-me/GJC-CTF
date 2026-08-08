@@ -81,6 +81,7 @@ describe("iterative LA CTF solver controller", () => {
 				lock: pinnedRequest.lock,
 				calibration: pinnedRequest.calibration,
 				oracle: pinnedRequest.oracle,
+				oracleTrustAnchors: pinnedRequest.oracle.trustAnchors,
 			};
 			const controller = new LactfIterativeController(root, undefined, authority);
 			expect(controller.tierController.authority).toBeDefined();

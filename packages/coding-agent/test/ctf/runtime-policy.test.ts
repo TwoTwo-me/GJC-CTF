@@ -116,7 +116,8 @@ function adapterArtifactDigest(adapter: EvaluationAdapterV1): ArtifactDigest {
 }
 
 function adapterImageDigest(adapter: EvaluationAdapterV1): ImageDigest {
-	if (adapter.kind === "container-service") return requireDigest(adapter.imageDigest, "container service image digest");
+	if (adapter.kind === "container-service")
+		return requireDigest(adapter.imageDigest, "container service image digest");
 	if (adapter.kind === "browser-session") return requireDigest(adapter.browserDigest, "browser session digest");
 	return runtime.imageDigest;
 }

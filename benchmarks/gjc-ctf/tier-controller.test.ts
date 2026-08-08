@@ -89,6 +89,7 @@ describe("LA CTF benchmark tier controller", () => {
 				lock: value.lock,
 				calibration: value.calibration,
 				oracle: value.oracle,
+				oracleTrustAnchors: value.oracle.trustAnchors,
 			});
 			const controller = new LactfTierController(root, LACTF_TIER_CONTROLLER_PATH, {
 				tier1: authority(first),
@@ -105,6 +106,25 @@ describe("LA CTF benchmark tier controller", () => {
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
+	});
+
+	test("rejects missing or self-rooted oracle trust anchors at construction", () => {
+		const request = authorizedVersionStatsRequest();
+		const base = {
+			manifest: request.manifest,
+			lock: request.lock,
+			calibration: request.calibration,
+			oracle: request.oracle,
+		};
+		expect(() => new LactfTierController(".", LACTF_TIER_CONTROLLER_PATH, {
+			tier1: { ...base, oracleTrustAnchors: undefined },
+			tier2: { ...base, oracleTrustAnchors: undefined },
+		})).toThrow(CtfError);
+		const fingerprint = request.oracle.trustAnchors.registrySignerFingerprint;
+		expect(() => new LactfTierController(".", LACTF_TIER_CONTROLLER_PATH, {
+			tier1: { ...base, oracleTrustAnchors: { registrySignerFingerprint: fingerprint, resultSignerFingerprint: fingerprint } },
+			tier2: { ...base, oracleTrustAnchors: { registrySignerFingerprint: fingerprint, resultSignerFingerprint: fingerprint } },
+		})).toThrow(CtfError);
 	});
 
 	test("rejects state that claims solves without a sealed report", () => {

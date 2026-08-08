@@ -49,10 +49,10 @@ describe("CTF scheduler integration contract", () => {
 		});
 
 		expect(result.status).toBe("complete");
-		expect(result.results[0]).toMatchObject({ status: "blocked", reason: "run authority is unavailable" });
+		expect(result.results[0]).toMatchObject({ status: "blocked", reason: "authority_unavailable" });
 	});
 
-	it("redacts oversized solver reasons in results and aggregation input", async () => {
+	it("maps oversized solver diagnostics to a closed durable reason code", async () => {
 		const result = await scheduleCtfRuns({
 			competitionId: "competition-1",
 			challengeIds: ["challenge-1"],
@@ -70,8 +70,7 @@ describe("CTF scheduler integration contract", () => {
 			},
 		});
 
-		expect(result.results[0]?.reason).toHaveLength(257);
-		expect(result.results[0]?.reason?.endsWith("…")).toBe(true);
+		expect(result.results[0]?.reason).toBe("solver_failed");
 	});
 
 	it("rejects untrusted backend statuses and artifact paths", async () => {
@@ -98,11 +97,11 @@ describe("CTF scheduler integration contract", () => {
 
 		expect((await execute({ status: "solved" })).results[0]).toMatchObject({
 			status: "failed",
-			reason: "solver backend returned an invalid result",
+			reason: "backend_invalid_result",
 		});
 		expect((await execute({ status: "candidate", artifacts: ["../../flag"] })).results[0]).toMatchObject({
 			status: "failed",
-			reason: "solver backend returned an invalid result",
+			reason: "backend_invalid_result",
 		});
 	});
 });

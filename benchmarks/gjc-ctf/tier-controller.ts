@@ -6,8 +6,9 @@ import {
 } from "../../packages/coding-agent/src/ctf/contracts/benchmark";
 import { canonicalDigest, digestsEqual, isDigest, type Digest } from "../../packages/coding-agent/src/ctf/contracts/digest";
 import { CtfError } from "../../packages/coding-agent/src/ctf/contracts/errors";
+import { type OracleTrustAnchorsV1, validateOracleTrustAnchors } from "../../packages/coding-agent/src/ctf/contracts/oracle";
 import { createCtfStateStore, type CtfStateStore, type CtfStateStoreLike } from "../../packages/coding-agent/src/ctf/state/storage";
-import { validateTrustedOracleRegistry } from "../../packages/coding-agent/src/ctf/runtime/oracle";
+import { validateAnchoredOracleRegistry } from "../../packages/coding-agent/src/ctf/runtime/oracle";
 import { validateBenchmarkCalibration } from "../../packages/coding-agent/src/ctf/runtime/policy";
 import { evaluateBenchmarkReport } from "./metrics";
 
@@ -34,6 +35,7 @@ export type LactfTierAuthority = Readonly<{
 	lock: unknown;
 	calibration: unknown;
 	oracle: unknown;
+	oracleTrustAnchors: unknown;
 }>;
 export type LactfTierAuthoritySet = Readonly<{
 	tier1: LactfTierAuthority;
@@ -46,6 +48,8 @@ type LactfTierAuthorityIdentity = Readonly<{
 	calibrationDigest: Digest;
 	oracleRegistryDigest: Digest;
 	oracleAuthorityDigest: Digest;
+	oracleRegistrySignerFingerprint: Digest;
+	oracleResultSignerFingerprint: Digest;
 }>;
 type LactfTierAuthoritySetIdentity = Readonly<Partial<Record<LactfTierNumber, LactfTierAuthorityIdentity>>>;
 
@@ -66,7 +70,7 @@ export type TierExpansion = Readonly<{
 	iteration: number;
 }>;
 export type LactfTierState = Readonly<{
-	schemaVersion: "gjc-lactf-tier-state-2";
+	schemaVersion: "gjc-lactf-tier-state-3";
 	identity: Digest;
 	authoritySet: LactfTierAuthoritySetIdentity;
 	authoritySetDigest: Digest;
@@ -110,7 +114,7 @@ function authoritySetDigest(authoritySet: LactfTierAuthoritySetIdentity): Digest
 
 function initialState(authoritySet: LactfTierAuthoritySetIdentity = {}): LactfTierState {
 	const base: Omit<LactfTierState, "stateDigest"> = {
-		schemaVersion: "gjc-lactf-tier-state-2",
+		schemaVersion: "gjc-lactf-tier-state-3",
 		identity: LACTF_TIER_CONTROLLER_IDENTITY,
 		authoritySet: authoritySet,
 		authoritySetDigest: authoritySetDigest(authoritySet),
@@ -143,14 +147,14 @@ function sameIds(left: readonly string[], right: readonly string[]): boolean {
 function isChallengeId(value: unknown): value is LactfTierChallengeId {
 	return typeof value === "string" && (ALL_IDS as readonly string[]).includes(value);
 }
-function trustedOracleAuthority(value: unknown) {
+function trustedOracleAuthority(value: unknown, trustAnchors: OracleTrustAnchorsV1) {
 	const input = value && typeof value === "object" && !Array.isArray(value)
 		? ((value as Record<string, unknown>).trustedRegistry ??
 			(value as Record<string, unknown>).oracleRegistry ??
 			(value as Record<string, unknown>).registry ??
 			value)
 		: value;
-	return validateTrustedOracleRegistry(input);
+	return validateAnchoredOracleRegistry(input, trustAnchors);
 }
 
 function pinAuthority(value: LactfTierAuthority): LactfTierAuthorityIdentity {
@@ -159,7 +163,8 @@ function pinAuthority(value: LactfTierAuthority): LactfTierAuthorityIdentity {
 		const lock = validateBenchmarkLock(value.lock);
 		assertBenchmarkLockMatchesManifest(lock, manifest);
 		const calibration = validateBenchmarkCalibration(value.calibration, { requireBenchmark: true });
-		const oracle = trustedOracleAuthority(value.oracle);
+		const trustAnchors = validateOracleTrustAnchors(value.oracleTrustAnchors);
+		const oracle = trustedOracleAuthority(value.oracle, trustAnchors);
 		if (
 			calibration.calibrationId !== manifest.calibrationId ||
 			!digestsEqual(calibration.operationalLimitsDigest, manifest.operationalLimitsDigest) ||
@@ -173,7 +178,9 @@ function pinAuthority(value: LactfTierAuthority): LactfTierAuthorityIdentity {
 			corpusDigest: benchmarkCorpusDigest(manifest),
 			calibrationDigest: calibration.calibrationDigest,
 			oracleRegistryDigest: oracle.registry.registryDigest,
-			oracleAuthorityDigest: canonicalDigest(oracle),
+			oracleAuthorityDigest: canonicalDigest({ oracle, trustAnchors }),
+			oracleRegistrySignerFingerprint: trustAnchors.registrySignerFingerprint,
+			oracleResultSignerFingerprint: trustAnchors.resultSignerFingerprint,
 		});
 	} catch (error) {
 		if (error instanceof CtfError) throw error;
@@ -192,14 +199,18 @@ function requestMatchesAuthority(request: unknown, authority: LactfTierAuthority
 		const lock = validateBenchmarkLock(value.lock);
 		assertBenchmarkLockMatchesManifest(lock, manifest);
 		const calibration = validateBenchmarkCalibration(value.calibration, { requireBenchmark: true });
-		const oracle = trustedOracleAuthority(value.oracle);
+		const trustAnchors = validateOracleTrustAnchors({
+			registrySignerFingerprint: authority.oracleRegistrySignerFingerprint,
+			resultSignerFingerprint: authority.oracleResultSignerFingerprint,
+		});
+		const oracle = trustedOracleAuthority(value.oracle, trustAnchors);
 		return (
 			digestsEqual(manifest.manifestDigest, authority.manifestDigest) &&
 			digestsEqual(lock.lockDigest, authority.lockDigest) &&
 			digestsEqual(benchmarkCorpusDigest(manifest), authority.corpusDigest) &&
 			digestsEqual(calibration.calibrationDigest, authority.calibrationDigest) &&
 			digestsEqual(oracle.registry.registryDigest, authority.oracleRegistryDigest) &&
-			digestsEqual(canonicalDigest(oracle), authority.oracleAuthorityDigest)
+			digestsEqual(canonicalDigest({ oracle, trustAnchors }), authority.oracleAuthorityDigest)
 		);
 	} catch {
 		return false;
@@ -216,7 +227,7 @@ export function validateLactfTierState(value: unknown): LactfTierState {
 	if (Object.keys(state).some(key => !expectedKeys.has(key)) || Object.keys(state).length !== expectedKeys.size) {
 		fail("integrity_error", "tier state has an invalid shape");
 	}
-	if (state.schemaVersion !== "gjc-lactf-tier-state-2" || !digestsEqual(String(state.identity), LACTF_TIER_CONTROLLER_IDENTITY)) {
+	if (state.schemaVersion !== "gjc-lactf-tier-state-3" || !digestsEqual(String(state.identity), LACTF_TIER_CONTROLLER_IDENTITY)) {
 		fail("integrity_error", "tier state identity does not match the immutable LA CTF corpus");
 	}
 	if (!state.authoritySet || typeof state.authoritySet !== "object" || Array.isArray(state.authoritySet) || !isDigest(state.authoritySetDigest)) {
@@ -227,9 +238,11 @@ export function validateLactfTierState(value: unknown): LactfTierState {
 	if (!sameIds(authorityKeys, []) && !sameIds(authorityKeys, ["1", "2"])) fail("integrity_error", "tier state authority set is incomplete");
 	for (const key of authorityKeys) {
 		const authority = authoritySet[key] as Record<string, unknown>;
-		if (!authority || typeof authority !== "object" || Array.isArray(authority) || Object.keys(authority).length !== 6 ||
+		if (!authority || typeof authority !== "object" || Array.isArray(authority) || Object.keys(authority).length !== 8 ||
 			!isDigest(authority.manifestDigest) || !isDigest(authority.lockDigest) || !isDigest(authority.corpusDigest) ||
-			!isDigest(authority.calibrationDigest) || !isDigest(authority.oracleRegistryDigest) || !isDigest(authority.oracleAuthorityDigest)) {
+			!isDigest(authority.calibrationDigest) || !isDigest(authority.oracleRegistryDigest) || !isDigest(authority.oracleAuthorityDigest) ||
+			!isDigest(authority.oracleRegistrySignerFingerprint) || !isDigest(authority.oracleResultSignerFingerprint) ||
+			digestsEqual(String(authority.oracleRegistrySignerFingerprint), String(authority.oracleResultSignerFingerprint))) {
 			fail("integrity_error", "tier state authority identity is invalid");
 		}
 	}
@@ -378,7 +391,7 @@ export class LactfTierController {
 			const nextTier: LactfTierNumber = expands ? 2 : current.activeTier;
 			const nextIteration = current.iteration + 1;
 			const base: Omit<LactfTierState, "stateDigest"> = {
-				schemaVersion: "gjc-lactf-tier-state-2",
+				schemaVersion: "gjc-lactf-tier-state-3",
 				identity: LACTF_TIER_CONTROLLER_IDENTITY,
 				authoritySet: this.authority,
 				authoritySetDigest: authoritySetDigest(this.authority),

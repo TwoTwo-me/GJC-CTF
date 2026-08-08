@@ -136,7 +136,6 @@ export type MaterializedCorpusAuthority = Readonly<{
 	visibleFileDigests: Readonly<Record<string, Digest>>;
 }>;
 
-
 function fail(
 	code: "integrity_error" | "missing_provenance" | "missing_evidence" | "unsupported_operation",
 	message: string,
@@ -186,7 +185,6 @@ function exactProvenance(expected: CorpusProvenance, candidate: unknown): boolea
 			file.sha256 === expected.files[index]?.sha256,
 	);
 }
-
 
 function within(root: string, candidate: string): boolean {
 	const relative = path.relative(root, candidate);
@@ -257,16 +255,12 @@ async function realRegularFile(root: string, relative: string): Promise<string> 
 	if (!within(root, real)) fail("integrity_error", "corpus file escapes its root");
 	return real;
 }
-async function materializedFilesMatch(
-	root: string,
-	expected: Readonly<Record<string, Digest>>,
-): Promise<void> {
+async function materializedFilesMatch(root: string, expected: Readonly<Record<string, Digest>>): Promise<void> {
 	const rootPath = path.resolve(root);
 	const rootStat = await fs.lstat(rootPath).catch(() => undefined);
 	if (!rootStat?.isDirectory() || rootStat.isSymbolicLink())
 		fail("integrity_error", "materialized corpus root must be a real directory");
-	if ((await fs.realpath(rootPath)) !== rootPath)
-		fail("integrity_error", "materialized corpus root is not canonical");
+	if ((await fs.realpath(rootPath)) !== rootPath) fail("integrity_error", "materialized corpus root is not canonical");
 	const discovered = new Set<string>();
 	const visit = async (directory: string, relativeDirectory: string): Promise<void> => {
 		for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
@@ -293,10 +287,7 @@ async function materializedFilesMatch(
 		}
 	}
 	await visit(rootPath, "");
-	if (
-		discovered.size !== expectedPaths.length ||
-		expectedPaths.some(relativePath => !discovered.has(relativePath))
-	)
+	if (discovered.size !== expectedPaths.length || expectedPaths.some(relativePath => !discovered.has(relativePath)))
 		fail("missing_provenance", "materialized corpus visible file set does not match registered provenance");
 	for (const relativePath of expectedPaths) {
 		const file = await realRegularFile(rootPath, relativePath);
@@ -348,27 +339,21 @@ export async function materializeCorpusEntry(
 	destinationRoot: string,
 ): Promise<MaterializedCorpus> {
 	validateCorpusEntry(entry);
-	const checkout = await fs.realpath(path.resolve(checkoutRoot));
-	const sourceLexical = path.resolve(checkout, entry.source.challengePath);
-	if (!within(checkout, sourceLexical)) fail("integrity_error", "challenge path escapes checkout root");
-	const sourceStat = await fs.lstat(sourceLexical).catch(() => undefined);
-	if (!sourceStat?.isDirectory() || sourceStat.isSymbolicLink())
-		fail("integrity_error", "challenge root must be a real directory");
-	const sourceRoot = await fs.realpath(sourceLexical);
-	if (!within(checkout, sourceRoot)) fail("integrity_error", "challenge path escapes checkout root");
+	const checkout = await pinnedCleanCheckout(checkoutRoot, entry.source);
 	const expected = new Map(entry.provenance.files.map(file => [file.relativePath, file.sha256]));
 	const files = [...entry.source.visibleFiles].sort();
 	const destination = await createConfinedDestination(path.resolve(destinationRoot));
 	for (const relative of files) {
-		const source = await realRegularFile(sourceRoot, relative);
-		if ((await hashFile(source)) !== expected.get(relative))
-			fail("integrity_error", `corpus hash mismatch: ${relative}`);
+		const blob = await readPinnedBlob(checkout, entry.source, relative);
+		const expectedHash = expected.get(relative);
+		if (expectedHash === undefined || sha256Hex(blob) !== expectedHash)
+			fail("integrity_error", `pinned corpus blob hash mismatch: ${relative}`);
 		const target = path.resolve(destination, relative);
 		if (!within(destination, target)) fail("integrity_error", "corpus file escapes its destination");
 		await fs.mkdir(path.dirname(target), { recursive: true });
 		if (!within(destination, await fs.realpath(path.dirname(target))))
 			fail("integrity_error", "corpus destination directory escapes its root");
-		await fs.copyFile(source, target, fs.constants.COPYFILE_EXCL);
+		await fs.writeFile(target, blob, { flag: "wx" });
 	}
 	return Object.freeze({
 		challengeId: entry.source.challengeId,
@@ -418,31 +403,105 @@ export type AcquiredCorpusCheckout = Readonly<{
 	repositoryUrl: typeof LACTF_REPOSITORY_URL;
 }>;
 
-async function runGit(args: readonly string[], cwd: string, home: string): Promise<string> {
+async function runGitBytes(args: readonly string[], cwd: string, home: string): Promise<Uint8Array> {
 	const git = Bun.which("git");
 	if (git === null) fail("unsupported_operation", "git is required for corpus acquisition");
-	const process = Bun.spawn([git, "-c", "core.hooksPath=/dev/null", ...args], {
-		cwd,
-		env: {
-			PATH: processEnvPath(),
-			HOME: home,
-			GIT_CONFIG_NOSYSTEM: "1",
-			GIT_TERMINAL_PROMPT: "0",
+	const process = Bun.spawn(
+		[
+			git,
+			"--no-replace-objects",
+			"-c",
+			"core.hooksPath=/dev/null",
+			"-c",
+			"core.fsmonitor=false",
+			"-c",
+			"submodule.recurse=false",
+			...args,
+		],
+		{
+			cwd,
+			env: {
+				PATH: processEnvPath(),
+				HOME: home,
+				GIT_CONFIG_GLOBAL: "/dev/null",
+				GIT_CONFIG_NOSYSTEM: "1",
+				GIT_NO_REPLACE_OBJECTS: "1",
+				GIT_TERMINAL_PROMPT: "0",
+			},
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
 		},
-		stdin: "ignore",
-		stdout: "pipe",
-		stderr: "pipe",
-	});
+	);
 	const [stdout, stderr, exitCode] = await Promise.all([
-		new Response(process.stdout).text(),
-		new Response(process.stderr).text(),
+		new Response(process.stdout).arrayBuffer(),
+		new Response(process.stderr).arrayBuffer(),
 		process.exited,
 	]);
 	if (exitCode !== 0) {
 		void stderr;
 		fail("missing_provenance", "corpus acquisition failed");
 	}
-	return stdout.trim();
+	return new Uint8Array(stdout);
+}
+
+async function runGit(args: readonly string[], cwd: string, home: string): Promise<string> {
+	return new TextDecoder().decode(await runGitBytes(args, cwd, home)).trim();
+}
+
+async function pinnedCleanCheckout(checkoutRoot: string, source: CorpusSource): Promise<string> {
+	const checkout = path.resolve(checkoutRoot);
+	const checkoutStat = await fs.lstat(checkout).catch(() => undefined);
+	if (!checkoutStat?.isDirectory() || checkoutStat.isSymbolicLink())
+		fail("integrity_error", "corpus checkout cache is not a real directory");
+	const real = await fs.realpath(checkout);
+	if (real !== checkout) fail("integrity_error", "corpus checkout cache is not canonical");
+	const gitDirectory = path.join(checkout, ".git");
+	const gitDirectoryStat = await fs.lstat(gitDirectory).catch(() => undefined);
+	if (!gitDirectoryStat?.isDirectory() || gitDirectoryStat.isSymbolicLink())
+		fail("integrity_error", "corpus checkout metadata is not a real directory");
+	if ((await fs.realpath(gitDirectory)) !== gitDirectory)
+		fail("integrity_error", "corpus checkout metadata is not canonical");
+	const home = path.join(path.dirname(checkout), ".git-home");
+	const status = await runGit(
+		["--git-dir=.git", "--work-tree=.", "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"],
+		checkout,
+		home,
+	);
+	if (status) fail("integrity_error", "corpus checkout cache is dirty or contains extra files");
+	const [topLevel, head, remote] = await Promise.all([
+		runGit(["--git-dir=.git", "--work-tree=.", "rev-parse", "--show-toplevel"], checkout, home),
+		runGit(["--git-dir=.git", "--work-tree=.", "rev-parse", "HEAD"], checkout, home),
+		runGit(["--git-dir=.git", "--work-tree=.", "remote", "get-url", "origin"], checkout, home),
+	]);
+	if (topLevel !== checkout || head !== source.sourceCommit || remote !== source.repositoryUrl)
+		fail("missing_provenance", "corpus checkout does not match the pinned source");
+	await visibleCheckoutMatchesPinnedBlobs(checkout, source);
+	return checkout;
+}
+
+async function visibleCheckoutMatchesPinnedBlobs(checkout: string, source: CorpusSource): Promise<void> {
+	for (const relativePath of source.visibleFiles) {
+		const worktreeFile = await realRegularFile(checkout, path.posix.join(source.challengePath, relativePath));
+		const pinnedBlob = await readPinnedBlob(checkout, source, relativePath);
+		if ((await hashFile(worktreeFile)) !== sha256Hex(pinnedBlob))
+			fail("integrity_error", `corpus checkout content differs from pinned blob: ${relativePath}`);
+	}
+}
+/** Reads raw object bytes; unlike checkout/show --filters, cat-file does not apply attributes or filters. */
+async function readPinnedBlob(checkout: string, source: CorpusSource, relativePath: string): Promise<Uint8Array> {
+	const home = path.join(path.dirname(checkout), ".git-home");
+	return runGitBytes(
+		[
+			"--git-dir=.git",
+			"--work-tree=.",
+			"cat-file",
+			"blob",
+			`${source.sourceCommit}:${source.challengePath}/${relativePath}`,
+		],
+		checkout,
+		home,
+	);
 }
 
 function processEnvPath(): string {
@@ -478,15 +537,7 @@ export async function acquireLactfCorpus(source: CorpusSource, cacheRoot: string
 	} else if (!existing.isDirectory() || existing.isSymbolicLink()) {
 		fail("integrity_error", "corpus checkout cache is not a real directory");
 	}
-	const checkoutRoot = await fs.realpath(destination);
-	if (!within(cacheReal, checkoutRoot)) fail("integrity_error", "corpus checkout escapes its cache");
-	const [head, remote] = await Promise.all([
-		runGit(["rev-parse", "HEAD"], checkoutRoot, home),
-		runGit(["remote", "get-url", "origin"], checkoutRoot, home),
-	]);
-	if (head !== LACTF_COMMIT || remote !== LACTF_REPOSITORY_URL) {
-		fail("missing_provenance", "corpus checkout does not match the pinned source");
-	}
+	const checkoutRoot = await pinnedCleanCheckout(destination, source);
 	return Object.freeze({
 		checkoutRoot,
 		sourceCommit: LACTF_COMMIT,

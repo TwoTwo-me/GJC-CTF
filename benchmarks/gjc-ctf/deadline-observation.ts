@@ -1,4 +1,5 @@
 import { canonicalDigest, digestsEqual, isDigest, type Digest } from "../../packages/coding-agent/src/ctf/contracts/digest";
+import { assertLactfEvidenceActive } from "./revoked-evidence";
 
 export type DiagnosticVersionObservation = Readonly<{
 	versionId: string;
@@ -73,6 +74,7 @@ function validateVersion(version: DiagnosticVersionObservation): void {
 
 export function createDeadlineVersionObservation(input: DeadlineObservationInput): DeadlineVersionObservation {
 	for (const version of input.versions) validateVersion(version);
+	for (const version of input.versions) assertLactfEvidenceActive(version.evidenceDigest);
 	if (input.schemaVersion !== "gjc-ctf-deadline-version-observation-1") throw new Error("deadline observation schema is invalid");
 	if (!Number.isFinite(Date.parse(input.generatedAt)) || !Number.isFinite(Date.parse(input.hardStop))) {
 		throw new Error("deadline observation timestamps are invalid");
@@ -89,6 +91,7 @@ export function createDeadlineVersionObservation(input: DeadlineObservationInput
 }
 
 export function validateDeadlineVersionObservation(value: DeadlineVersionObservation): DeadlineVersionObservation {
+	assertLactfEvidenceActive(value.observationDigest);
 	const { observationDigest, ...input } = value;
 	const rebuilt = createDeadlineVersionObservation(input);
 	if (!digestsEqual(rebuilt.observationDigest, observationDigest)) throw new Error("deadline observation digest mismatch");

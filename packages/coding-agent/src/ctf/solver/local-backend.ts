@@ -406,7 +406,10 @@ export function createLocalCtfSolverBackend(options: LocalCtfSolverBackendOption
 				if (materialized.solverRoute !== undefined) {
 					try {
 						if (validateSolverRoute(materialized.solverRoute).routeDigest !== route.routeDigest)
-							return { status: "blocked", reason: "materialized solver route does not match the reviewed route" };
+							return {
+								status: "blocked",
+								reason: "materialized solver route does not match the reviewed route",
+							};
 					} catch {
 						return { status: "blocked", reason: "materialized solver route is invalid" };
 					}

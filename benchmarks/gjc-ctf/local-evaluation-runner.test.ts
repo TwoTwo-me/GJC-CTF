@@ -91,16 +91,14 @@ async function fixture(): Promise<{ request: LocalEvaluationRunnerRequest; root:
 }
 
 describe("verified local evaluation runner", () => {
-	test("materializes only approved files and returns an unscored candidate", async () => {
+	test("rejects a caller-created directory that is not the exact pinned Git checkout", async () => {
 		const { request, root } = await fixture();
 		try {
 			const result = await runLocalEvaluation(request);
-			expect(result.status).toBe("evaluated");
-			if (result.status === "evaluated") {
-				expect(result.result.kind).toBe("candidate");
-				expect(result.scored).toBe(false);
-				expect(JSON.stringify(result)).not.toContain("canary-private-data");
-				expect(JSON.stringify(result)).not.toContain("flag.txt");
+			expect(result.status).toBe("unavailable");
+			if (result.status === "unavailable") {
+				expect(result.sanitizedReason).not.toContain("canary-private-data");
+				expect(result.sanitizedReason).not.toContain("flag.txt");
 			}
 		} finally { await fs.rm(root, { recursive: true, force: true }); }
 	});

@@ -171,12 +171,13 @@ describe("complete CTF preflight reports", () => {
 		expectCode(() => validatePreflightReport(fixture), "missing_provenance");
 	});
 	it("rejects bare, keyless, and invalidly signed oracle registries", () => {
+		expectCode(() => buildCompletePreflightReport({ ...completeRequest, oracleRegistry }), "oracle_integrity_error");
 		expectCode(
-			() => buildCompletePreflightReport({ ...completeRequest, oracleRegistry }),
-			"oracle_integrity_error",
-		);
-		expectCode(
-			() => buildCompletePreflightReport({ ...completeRequest, oracleRegistry: { registry: oracleRegistry, keys: [] } }),
+			() =>
+				buildCompletePreflightReport({
+					...completeRequest,
+					oracleRegistry: { registry: oracleRegistry, keys: [] },
+				}),
 			"oracle_integrity_error",
 		);
 		const invalidRegistryBase = {
@@ -211,7 +212,10 @@ describe("complete CTF preflight reports", () => {
 	it("rejects limits above immutable maxima and unsafe artifact paths", () => {
 		const overMaxBase = { ...limitsBase, wallMs: safety.wallMsMax + 1 };
 		const overMax = { ...overMaxBase, limitsDigest: operationalLimitsDigest(overMaxBase) };
-		expectCode(() => buildCompletePreflightReport({ ...completeRequest, operationalLimits: overMax }), "unsafe_sandbox");
+		expectCode(
+			() => buildCompletePreflightReport({ ...completeRequest, operationalLimits: overMax }),
+			"unsafe_sandbox",
+		);
 		expectCode(
 			() => buildCompletePreflightReport({ ...completeRequest, visibleArtifactAllowlist: ["../answer.txt"] }),
 			"missing_provenance",
@@ -238,7 +242,8 @@ describe("complete CTF preflight reports", () => {
 	it("rejects incomplete tool digests and deferred external execution", () => {
 		expectCode(() => buildCompletePreflightReport({ ...completeRequest, toolDigests: {} }), "missing_provenance");
 		expectCode(
-			() => buildCompletePreflightReport({ ...completeRequest, executionClass: "external-untrusted/proxmox-deferred" }),
+			() =>
+				buildCompletePreflightReport({ ...completeRequest, executionClass: "external-untrusted/proxmox-deferred" }),
 			"unsafe_sandbox",
 		);
 	});
@@ -256,12 +261,18 @@ describe("complete CTF preflight reports", () => {
 			() => buildCompletePreflightReport({ ...completeRequest, sourceRevision: "forged-revision" }),
 			"digest_mismatch",
 		);
-		expectCode(() => buildCompletePreflightReport({ ...completeRequest, oracleId: "oracle-two" }), "oracle_integrity_error");
+		expectCode(
+			() => buildCompletePreflightReport({ ...completeRequest, oracleId: "oracle-two" }),
+			"oracle_integrity_error",
+		);
 		expectCode(
 			() => buildCompletePreflightReport({ ...completeRequest, visibleArtifactAllowlist: ["other.txt"] }),
 			"missing_provenance",
 		);
-		expectCode(() => buildCompletePreflightReport({ ...completeRequest, backendDigest: DIGEST_A }), "digest_mismatch");
+		expectCode(
+			() => buildCompletePreflightReport({ ...completeRequest, backendDigest: DIGEST_A }),
+			"digest_mismatch",
+		);
 	});
 	it("rejects descriptors absent from registered manifests", () => {
 		const unregisteredDescriptorBase = { ...boundDescriptorBase, id: "challenge-two" };

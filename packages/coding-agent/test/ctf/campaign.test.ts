@@ -77,6 +77,7 @@ function options(
 		store: root,
 		backend: { ...backend, terminate: backend.terminate ?? (async () => {}) },
 		authorityFor,
+		terminateAuthority: async ({ ownerId }) => ({ ownerId }),
 		concurrency: 1,
 		maxAttempts,
 		materialize: Object.assign(async () => corpus, { terminate: async () => {} }),

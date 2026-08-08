@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { sha256Hex } from "../../packages/coding-agent/src/ctf/contracts/digest";
 import { createDeadlineVersionObservation, validateDeadlineVersionObservation } from "./deadline-observation";
+import { assertLactfEvidenceActive, LACTF_REVOKED_EVIDENCE } from "./revoked-evidence";
 
 const D = sha256Hex("diagnostic");
 const UNKNOWN = ["solveRate", "passAt1", "passAt3", "firstValidLatencyMs", "cost"] as const;
@@ -77,5 +78,11 @@ describe("deadline version observation", () => {
 				versions: [{ ...value.versions[0], independentlyVerifiedSolveCount: 1 }, value.versions[1]],
 			}),
 		).toThrow(/cannot claim/);
+	});
+
+	test("rejects every machine-registered invalidated campaign artifact", () => {
+		for (const revocation of LACTF_REVOKED_EVIDENCE) {
+			expect(() => assertLactfEvidenceActive(revocation.digest)).toThrow(/invalidated/u);
+		}
 	});
 });

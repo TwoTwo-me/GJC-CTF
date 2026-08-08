@@ -22,6 +22,9 @@ export const OracleEntryV1Schema = z
 	.strict();
 export type OracleEntryV1 = z.infer<typeof OracleEntryV1Schema>;
 
+export const OracleSanitizedSummaryV1Schema = z.enum(["pass", "fail", "invalid", "error", "unavailable"]);
+export type OracleSanitizedSummaryV1 = z.infer<typeof OracleSanitizedSummaryV1Schema>;
+
 export const TrustedOracleKeyV1Schema = z
 	.object({
 		keyId: CtfIdSchema,
@@ -48,6 +51,14 @@ export const TrustedOracleRegistryV1Schema = z
 	})
 	.strict();
 export type TrustedOracleRegistryV1 = z.infer<typeof TrustedOracleRegistryV1Schema>;
+export const OracleTrustAnchorsV1Schema = z
+	.object({
+		registrySignerFingerprint: DigestSchema,
+		resultSignerFingerprint: DigestSchema,
+	})
+	.strict();
+export type OracleTrustAnchorsV1 = z.infer<typeof OracleTrustAnchorsV1Schema>;
+
 export type TrustedOracleRegistry = TrustedOracleRegistryV1;
 export const OracleResultV1Schema = z
 	.object({
@@ -61,7 +72,8 @@ export const OracleResultV1Schema = z
 		verdict: z.enum(["pass", "fail", "invalid", "error"]),
 		verifierVersion: z.string().min(1).max(128),
 		outputDigest: DigestSchema,
-		sanitizedSummary: z.string().max(16_384),
+		sanitizedSummary: OracleSanitizedSummaryV1Schema,
+
 		signature: z.string().min(1).max(16_384),
 		issuedAt: TimestampSchema.optional(),
 	})
@@ -120,6 +132,17 @@ export function validateTrustedOracleRegistryShape(value: unknown): TrustedOracl
 	}
 	return parsed.data;
 }
+export function validateOracleTrustAnchors(value: unknown): OracleTrustAnchorsV1 {
+	const parsed = OracleTrustAnchorsV1Schema.safeParse(value);
+	if (!parsed.success) {
+		throw new CtfError("oracle_integrity_error", "oracle trust anchors are invalid", {
+			details: { issues: parsed.error.issues },
+		});
+	}
+	if (parsed.data.registrySignerFingerprint === parsed.data.resultSignerFingerprint)
+		throw new CtfError("oracle_integrity_error", "oracle trust-anchor roles must use distinct principals");
+	return parsed.data;
+}
 
 export function validateOracleResult(
 	value: unknown,
@@ -152,3 +175,5 @@ export const TrustedOracleRegistrySchema = TrustedOracleRegistryV1Schema;
 export const parseOracleEntry = validateOracleEntry;
 export const parseOracleResult = validateOracleResult;
 export const parseTrustedOracleRegistry = validateTrustedOracleRegistryShape;
+export const OracleTrustAnchorsSchema = OracleTrustAnchorsV1Schema;
+export const parseOracleTrustAnchors = validateOracleTrustAnchors;

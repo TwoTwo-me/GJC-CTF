@@ -72,7 +72,7 @@ describe("bounded CTF scheduler", () => {
 		});
 		expect(malformed.results[0]).toMatchObject({
 			status: "failed",
-			reason: "solver backend returned invalid artifact evidence",
+			reason: "backend_invalid_artifact_evidence",
 		});
 		const mismatched = await execute({
 			status: "candidate",
@@ -81,7 +81,7 @@ describe("bounded CTF scheduler", () => {
 		});
 		expect(mismatched.results[0]).toMatchObject({
 			status: "failed",
-			reason: "solver backend artifact evidence does not match paths",
+			reason: "backend_result_mismatch",
 		});
 	});
 
@@ -95,7 +95,7 @@ describe("bounded CTF scheduler", () => {
 			backend,
 			createUnavailable: unavailable,
 		});
-		expect(result.results[0]).toMatchObject({ status: "blocked", reason: "run authority is unavailable" });
+		expect(result.results[0]).toMatchObject({ status: "blocked", reason: "authority_unavailable" });
 	});
 
 	it("keeps unavailable mode auditable when no backend is admitted", async () => {
@@ -126,6 +126,78 @@ describe("bounded CTF scheduler", () => {
 				createUnavailable: unavailable,
 			}),
 		).rejects.toThrow(/termination acknowledgment/);
+	});
+	it("fences a budget-expired authority acquisition until its owner acknowledges termination", async () => {
+		const started = Promise.withResolvers<void>();
+		const acknowledge = Promise.withResolvers<void>();
+		let authorityOwnerId: string | undefined;
+		let ownerId: string | undefined;
+		let completed = false;
+		const scheduled = scheduleCtfRuns({
+			competitionId: "competition-1",
+			challengeIds: ["alpha"],
+			mode: "competition",
+			concurrency: 1,
+			budgetMs: 1,
+			backend: { id: "backend-1", solve: async () => ({ status: "candidate" }), terminate: async () => {} },
+			authorityFor: async input => {
+				authorityOwnerId = input.authorityOwnerId;
+				started.resolve();
+				return await new Promise<CtfRunAuthority>(() => {});
+			},
+			terminateAuthority: async request => {
+				ownerId = request.ownerId;
+				await acknowledge.promise;
+				return { ownerId: request.ownerId };
+			},
+			createUnavailable: unavailable,
+		}).then(value => {
+			completed = true;
+			return value;
+		});
+		await started.promise;
+		await Bun.sleep(5);
+		expect(completed).toBe(false);
+		expect(ownerId).toBe(authorityOwnerId);
+		acknowledge.resolve();
+		await expect(scheduled).resolves.toMatchObject({ results: [{ status: "cancelled", reason: "cancelled" }] });
+	});
+	it("rejects an authority termination acknowledgment from a different owner", async () => {
+		const controller = new AbortController();
+		const started = Promise.withResolvers<void>();
+		const scheduled = scheduleCtfRuns({
+			competitionId: "competition-1",
+			challengeIds: ["alpha"],
+			mode: "competition",
+			concurrency: 1,
+			signal: controller.signal,
+			backend: { id: "backend-1", solve: async () => ({ status: "candidate" }) },
+			authorityFor: async () => {
+				started.resolve();
+				return await new Promise<CtfRunAuthority>(() => {});
+			},
+			terminateAuthority: async () => ({ ownerId: "wrong-owner" }),
+			createUnavailable: unavailable,
+		});
+		await started.promise;
+		controller.abort("deadline");
+		await expect(scheduled).rejects.toThrow(/owner mismatch/);
+	});
+	it("does not persist backend diagnostic text as a run reason", async () => {
+		const result = await scheduleCtfRuns({
+			competitionId: "competition-1",
+			challengeIds: ["alpha"],
+			mode: "competition",
+			concurrency: 1,
+			backend: {
+				id: "backend-1",
+				solve: async () => ({ status: "failed", reason: "private token: abc123" }),
+			},
+			authority,
+			createUnavailable: unavailable,
+		});
+		expect(result.results[0]).toMatchObject({ status: "failed", reason: "solver_failed" });
+		expect(JSON.stringify(result.results[0])).not.toContain("private token");
 	});
 	it("waits for owned termination acknowledgment and discards a late solver result", async () => {
 		const started = Promise.withResolvers<void>();
@@ -280,7 +352,7 @@ describe("bounded CTF scheduler", () => {
 			}),
 			createUnavailable: unavailable,
 		});
-		expect(result.results).toMatchObject([{ challengeId: "alpha", status: "failed", reason: "solver setup failed" }]);
+		expect(result.results).toMatchObject([{ challengeId: "alpha", status: "failed", reason: "setup_failed" }]);
 		expect(finalized).toEqual([{ status: "failed", reason: "solver setup failed" }]);
 	});
 	it("finalizes a durable run once when materialization fails", async () => {
@@ -307,7 +379,7 @@ describe("bounded CTF scheduler", () => {
 			terminateMaterialization: async () => {},
 			createUnavailable: unavailable,
 		});
-		expect(result.results).toMatchObject([{ challengeId: "alpha", status: "failed", reason: "solver setup failed" }]);
+		expect(result.results).toMatchObject([{ challengeId: "alpha", status: "failed", reason: "setup_failed" }]);
 		expect(finalized).toEqual([{ status: "failed", reason: "solver setup failed" }]);
 	});
 	it("waits for materialization termination acknowledgment before finalizing cancellation", async () => {
@@ -353,9 +425,7 @@ describe("bounded CTF scheduler", () => {
 		expect(finalized).toEqual([]);
 		acknowledge.resolve();
 		const completed = await result;
-		expect(completed.results).toMatchObject([
-			{ challengeId: "alpha", status: "cancelled", reason: "run cancelled or budget exhausted" },
-		]);
+		expect(completed.results).toMatchObject([{ challengeId: "alpha", status: "cancelled", reason: "cancelled" }]);
 		expect(finalized).toEqual([{ status: "cancelled", reason: "run cancelled or budget exhausted" }]);
 	});
 	it("refuses competition materialization without termination acknowledgment", async () => {

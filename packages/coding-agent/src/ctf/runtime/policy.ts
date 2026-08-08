@@ -220,7 +220,6 @@ function descriptorExecutionClass(
 	return "external-untrusted/proxmox-deferred";
 }
 
-
 function assertLocalDescriptorBinding(
 	request: LocalExecutionRequest,
 	descriptor: ChallengeDescriptor | undefined,
@@ -787,11 +786,7 @@ export function buildCompletePreflightReport(input: CompletePreflightReportInput
 	if (!input || typeof input !== "object") {
 		throw new CtfError("missing_provenance", "preflight report input is missing");
 	}
-	const descriptor = validatePreflightDescriptorBinding(
-		input,
-		input.registeredDescriptor,
-		input.registeredManifest,
-	);
+	const descriptor = validatePreflightDescriptorBinding(input, input.registeredDescriptor, input.registeredManifest);
 	if (input.executionClass === "external-untrusted/proxmox-deferred") {
 		throw new CtfError("unsafe_sandbox", "deferred external execution cannot pass local preflight");
 	}

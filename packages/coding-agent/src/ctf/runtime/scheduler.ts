@@ -16,6 +16,19 @@ export type CtfSolverOutcome = Readonly<{
 	artifactEvidence?: readonly CtfArtifactEvidence[];
 }>;
 
+export type CtfRunReason =
+	| "authority_unavailable"
+	| "backend_invalid_artifact_evidence"
+	| "backend_invalid_result"
+	| "backend_result_mismatch"
+	| "cancelled"
+	| "setup_failed"
+	| "solver_failed";
+
+export type CtfTerminationAcknowledgment = Readonly<{
+	ownerId: string;
+}>;
+
 export type CtfMaterializedChallenge = Readonly<{
 	root: string;
 	provenanceDigest: string;
@@ -80,7 +93,7 @@ export type CtfScheduledRun =
 			competitionId: string;
 			challengeId: string;
 			mode: CtfRunMode;
-			reason?: string;
+			reason?: CtfRunReason;
 			artifacts?: readonly string[];
 			artifactEvidence?: readonly CtfArtifactEvidence[];
 	  }>;
@@ -97,8 +110,16 @@ export type CtfBatchScheduleRequest = Readonly<{
 	/** Static authority is retained for one-challenge compatibility only. */
 	authority?: CtfRunAuthority;
 	authorityFor?: (
-		input: Readonly<{ challengeId: string; runId: string; index: number; signal: AbortSignal }>,
+		input: Readonly<{
+			challengeId: string;
+			runId: string;
+			authorityOwnerId: string;
+			index: number;
+			signal: AbortSignal;
+		}>,
 	) => Promise<CtfRunAuthority>;
+	/** Resolves only after authority acquisition-owned work can no longer write for this owner. */
+	terminateAuthority?: (request: CtfTerminationRequest) => Promise<CtfTerminationAcknowledgment>;
 	materializedFor?: (
 		input: Readonly<{
 			challengeId: string;
@@ -216,6 +237,17 @@ function normalizeSolverOutcome(value: unknown): CtfSolverOutcome {
 		...(artifacts === undefined ? {} : { artifacts }),
 		...(artifactEvidence === undefined ? {} : { artifactEvidence }),
 	};
+}
+function durableReason(outcome: CtfSolverOutcome): CtfRunReason | undefined {
+	if (outcome.status === "candidate") return undefined;
+	if (outcome.status === "blocked") return "authority_unavailable";
+	if (outcome.status === "cancelled") return "cancelled";
+	if (outcome.reason === "solver backend returned invalid artifact evidence")
+		return "backend_invalid_artifact_evidence";
+	if (outcome.reason === "solver backend artifact evidence does not match paths") return "backend_result_mismatch";
+	if (outcome.reason === "solver backend returned an invalid result") return "backend_invalid_result";
+	if (outcome.reason === "solver setup failed") return "setup_failed";
+	return "solver_failed";
 }
 
 function aggregationDigest(results: readonly CtfScheduledRun[]): string {
@@ -351,6 +383,60 @@ async function prepareWithTermination(
 		input.signal.removeEventListener("abort", abort);
 	}
 }
+async function acquireAuthorityWithTermination(
+	authorityFor: NonNullable<CtfBatchScheduleRequest["authorityFor"]>,
+	terminateAuthority: NonNullable<CtfBatchScheduleRequest["terminateAuthority"]>,
+	input: Readonly<{
+		challengeId: string;
+		runId: string;
+		authorityOwnerId: string;
+		index: number;
+		signal: AbortSignal;
+	}>,
+): Promise<CtfRunAuthority> {
+	const cancelled = Promise.withResolvers<never>();
+	let termination: Promise<void> | undefined;
+	const terminate = () => {
+		if (termination === undefined) {
+			termination = Promise.resolve()
+				.then(() =>
+					terminateAuthority({
+						runId: input.runId,
+						challengeId: input.challengeId,
+						ownerId: input.authorityOwnerId,
+						reason: input.signal.reason === "run budget exhausted" ? "budget_exhausted" : "cancelled",
+					}),
+				)
+				.then(acknowledgment => {
+					if (acknowledgment === undefined || acknowledgment.ownerId !== input.authorityOwnerId)
+						throw new CtfError("invalid_api_request", "authority termination acknowledgment owner mismatch");
+				});
+			void termination.then(
+				() => cancelled.reject(new Error("run cancelled")),
+				error => cancelled.reject(error),
+			);
+		}
+		return termination;
+	};
+	const abort = () => {
+		void terminate();
+	};
+	input.signal.addEventListener("abort", abort, { once: true });
+	try {
+		if (input.signal.aborted) {
+			await terminate();
+			throw new Error("run cancelled");
+		}
+		const authority = await Promise.race([authorityFor(input), cancelled.promise]);
+		if (input.signal.aborted) {
+			await terminate();
+			throw new Error("run cancelled");
+		}
+		return authority;
+	} finally {
+		input.signal.removeEventListener("abort", abort);
+	}
+}
 async function awaitTerminationAcknowledgments(owners: readonly (() => Promise<void>)[]): Promise<void> {
 	const acknowledgments = await Promise.allSettled(owners.map(owner => Promise.resolve().then(owner)));
 	const rejected = acknowledgments.find(
@@ -367,7 +453,6 @@ async function awaitTerminationAcknowledgments(owners: readonly (() => Promise<v
 async function executeWithBudget(
 	backend: CtfSolverBackend,
 	request: CtfSolverRequest,
-	controller: AbortController,
 	terminate: (() => Promise<void>) | undefined,
 ): Promise<CtfSolverOutcome> {
 	const cancelled = Promise.withResolvers<CtfSolverOutcome>();
@@ -387,10 +472,6 @@ async function executeWithBudget(
 		if (terminate !== undefined) void terminateRun();
 	};
 	request.signal.addEventListener("abort", onAbort, { once: true });
-	const timer =
-		request.budgetMs === undefined
-			? undefined
-			: setTimeout(() => controller.abort("run budget exhausted"), request.budgetMs);
 	const execution = Promise.resolve()
 		.then(() => backend.solve(request))
 		.then(normalizeSolverOutcome)
@@ -412,7 +493,6 @@ async function executeWithBudget(
 		return outcome;
 	} finally {
 		request.signal.removeEventListener("abort", onAbort);
-		if (timer !== undefined) clearTimeout(timer);
 	}
 }
 
@@ -455,12 +535,20 @@ export async function scheduleCtfRuns(request: CtfBatchScheduleRequest): Promise
 		request.terminatePreparation === undefined
 	)
 		throw new CtfError("invalid_api_request", "production preparation requires termination acknowledgment");
+	if (
+		request.mode === "competition" &&
+		request.authorityFor !== undefined &&
+		(request.budgetMs !== undefined || request.signal !== undefined) &&
+		request.terminateAuthority === undefined
+	)
+		throw new CtfError("invalid_api_request", "production authority acquisition requires termination acknowledgment");
 	const runPlans = challengeIds.map((challengeId, index) => ({
 		challengeId,
 		index,
 		runId: request.runIdFactory?.({ challengeId, index }) ?? randomUUID(),
 		materializationOwnerId: randomUUID(),
 		preparationOwnerId: randomUUID(),
+		authorityOwnerId: randomUUID(),
 	}));
 	if (
 		runPlans.some(plan => !validRunId(plan.runId)) ||
@@ -476,7 +564,7 @@ export async function scheduleCtfRuns(request: CtfBatchScheduleRequest): Promise
 			const index = cursor++;
 			const plan = runPlans[index];
 			if (plan === undefined) return;
-			const { challengeId, runId, materializationOwnerId, preparationOwnerId } = plan;
+			const { challengeId, runId, materializationOwnerId, preparationOwnerId, authorityOwnerId } = plan;
 			const backend = request.backend;
 			if (backend === undefined) {
 				results[index] = await request.createUnavailable(challengeId, request.mode);
@@ -485,6 +573,10 @@ export async function scheduleCtfRuns(request: CtfBatchScheduleRequest): Promise
 			const signalController = new AbortController();
 			const abort = () => signalController.abort(request.signal?.reason);
 			request.signal?.addEventListener("abort", abort, { once: true });
+			const timer =
+				request.budgetMs === undefined
+					? undefined
+					: setTimeout(() => signalController.abort("run budget exhausted"), request.budgetMs);
 			try {
 				let preparation: CtfPreparedRun | undefined;
 				let terminalError: CtfError | undefined;
@@ -516,10 +608,24 @@ export async function scheduleCtfRuns(request: CtfBatchScheduleRequest): Promise
 					const authority =
 						preparation?.authority ??
 						(request.authorityFor !== undefined
-							? await awaitWithAbort(
-									request.authorityFor({ challengeId, runId, index, signal: signalController.signal }),
-									signalController.signal,
-								)
+							? request.terminateAuthority === undefined
+								? await awaitWithAbort(
+										request.authorityFor({
+											challengeId,
+											runId,
+											authorityOwnerId,
+											index,
+											signal: signalController.signal,
+										}),
+										signalController.signal,
+									)
+								: await acquireAuthorityWithTermination(request.authorityFor, request.terminateAuthority, {
+										challengeId,
+										runId,
+										authorityOwnerId,
+										index,
+										signal: signalController.signal,
+									})
 							: request.authority);
 					if (signalController.signal.aborted) {
 						outcome = { status: "cancelled", reason: "run cancelled or budget exhausted" };
@@ -580,7 +686,6 @@ export async function scheduleCtfRuns(request: CtfBatchScheduleRequest): Promise
 								authority: { competitionId: request.competitionId, ...authority },
 								...(materialized === undefined ? {} : { materialized }),
 							},
-							signalController,
 							backend.terminate === undefined
 								? undefined
 								: async () =>
@@ -662,10 +767,11 @@ export async function scheduleCtfRuns(request: CtfBatchScheduleRequest): Promise
 					competitionId: request.competitionId,
 					challengeId,
 					mode: request.mode,
-					reason: redactedReason(outcome.reason),
+					reason: durableReason(outcome),
 				};
 			} finally {
 				request.signal?.removeEventListener("abort", abort);
+				if (timer !== undefined) clearTimeout(timer);
 			}
 		}
 	};

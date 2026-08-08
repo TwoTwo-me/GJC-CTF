@@ -2,13 +2,38 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-
 import {
 	buildCorpusProvenance,
 	LACTF_CORPUS_SOURCES,
 	materializeCorpusEntry,
 	validateCorpusEntry,
 } from "../../src/ctf/corpus";
+async function git(cwd: string, args: readonly string[]): Promise<void> {
+	const executable = Bun.which("git");
+	if (executable === null) throw new Error("git is required for corpus fixtures");
+	const process = Bun.spawn([executable, ...args], { cwd, stdout: "ignore", stderr: "ignore" });
+	if ((await process.exited) !== 0) throw new Error(`git fixture command failed: ${args[0] ?? ""}`);
+}
+
+async function createCheckout(root: string): Promise<{ checkout: string; challenge: string }> {
+	const checkout = path.join(root, "checkout");
+	const challenge = path.join(checkout, LACTF_CORPUS_SOURCES[0].challengePath);
+	await fs.mkdir(challenge, { recursive: true });
+	await fs.writeFile(path.join(challenge, "chall.txt"), "fixture bytes\n");
+	await git(checkout, ["init"]);
+	await git(checkout, ["add", "."]);
+	await git(checkout, [
+		"-c",
+		"user.email=fixture@example.invalid",
+		"-c",
+		"user.name=Corpus Fixture",
+		"commit",
+		"-m",
+		"fixture",
+	]);
+	await git(checkout, ["remote", "add", "origin", LACTF_CORPUS_SOURCES[0].repositoryUrl]);
+	return { checkout, challenge };
+}
 
 describe("content-addressed LA CTF corpus", () => {
 	const roots: string[] = [];
@@ -30,23 +55,43 @@ describe("content-addressed LA CTF corpus", () => {
 		expect(crypto?.visibleFiles).not.toContain("pt.txt");
 	});
 
-	it("hashes and materializes only the recorded regular files", async () => {
+	it("rejects an unpinned checkout before materialization", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-corpus-"));
 		roots.push(root);
-		const checkout = path.join(root, "checkout");
-		const challenge = path.join(checkout, LACTF_CORPUS_SOURCES[0].challengePath);
-		await fs.mkdir(challenge, { recursive: true });
-		await fs.writeFile(path.join(challenge, "chall.txt"), "clean-room fixture\n");
-		await fs.writeFile(path.join(challenge, "solve.py"), "must not be visible\n");
+		const { checkout, challenge } = await createCheckout(root);
 		const provenance = await buildCorpusProvenance(challenge, LACTF_CORPUS_SOURCES[0]);
-		const output = await materializeCorpusEntry(
-			{ source: LACTF_CORPUS_SOURCES[0], provenance },
-			checkout,
-			path.join(root, "materialized"),
-		);
-		expect(output.scored).toBe(false);
-		expect(await fs.readFile(path.join(output.root, "chall.txt"), "utf8")).toBe("clean-room fixture\n");
-		expect(await Bun.file(path.join(output.root, "solve.py")).exists()).toBe(false);
+		await expect(
+			materializeCorpusEntry(
+				{ source: LACTF_CORPUS_SOURCES[0], provenance },
+				checkout,
+				path.join(root, "materialized"),
+			),
+		).rejects.toMatchObject({ code: "missing_provenance" });
+	});
+
+	it("rejects dirty, missing, extra, and symlink-substituted checkout files", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-corpus-cache-"));
+		roots.push(root);
+		const { checkout, challenge } = await createCheckout(root);
+		const provenance = await buildCorpusProvenance(challenge, LACTF_CORPUS_SOURCES[0]);
+		const entry = { source: LACTF_CORPUS_SOURCES[0], provenance };
+		const materialize = () => materializeCorpusEntry(entry, checkout, path.join(root, "materialized"));
+
+		await fs.writeFile(path.join(challenge, "chall.txt"), "substituted bytes\n");
+		await expect(materialize()).rejects.toMatchObject({ code: "integrity_error" });
+		await git(checkout, ["checkout", "--", "."]);
+		await fs.rm(path.join(challenge, "chall.txt"));
+		await expect(materialize()).rejects.toMatchObject({ code: "integrity_error" });
+
+		await git(checkout, ["checkout", "--", "."]);
+
+		await fs.writeFile(path.join(checkout, "untracked.txt"), "extra\n");
+		await expect(materialize()).rejects.toMatchObject({ code: "integrity_error" });
+
+		await fs.rm(path.join(checkout, "untracked.txt"));
+		await fs.rm(path.join(challenge, "chall.txt"));
+		await fs.symlink(path.join(root, "outside"), path.join(challenge, "chall.txt"));
+		await expect(materialize()).rejects.toMatchObject({ code: "integrity_error" });
 	});
 
 	it("rejects provenance mismatch, unsafe paths, and install commands", () => {
@@ -75,30 +120,15 @@ describe("content-addressed LA CTF corpus", () => {
 		expect(() => validateCorpusEntry({ ...base, installCommands: ["make install"] })).toThrow(/install/u);
 	});
 
-	it("rejects symbolic links in visible file paths and destination parents", async () => {
+	it("rejects symbolic links while building provenance", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-corpus-symlink-"));
 		roots.push(root);
-		const checkout = path.join(root, "checkout");
-		const challenge = path.join(checkout, LACTF_CORPUS_SOURCES[0].challengePath);
+		const challenge = path.join(root, LACTF_CORPUS_SOURCES[0].challengePath);
 		await fs.mkdir(challenge, { recursive: true });
 		await fs.writeFile(path.join(root, "outside"), "outside\n");
 		await fs.symlink(path.join(root, "outside"), path.join(challenge, "chall.txt"));
 		await expect(buildCorpusProvenance(challenge, LACTF_CORPUS_SOURCES[0])).rejects.toMatchObject({
 			code: "integrity_error",
 		});
-
-		await fs.rm(path.join(challenge, "chall.txt"));
-		await fs.writeFile(path.join(challenge, "chall.txt"), "safe\n");
-		const provenance = await buildCorpusProvenance(challenge, LACTF_CORPUS_SOURCES[0]);
-		const outsideDestination = path.join(root, "outside-destination");
-		await fs.mkdir(outsideDestination);
-		await fs.symlink(outsideDestination, path.join(root, "linked-parent"));
-		await expect(
-			materializeCorpusEntry(
-				{ source: LACTF_CORPUS_SOURCES[0], provenance },
-				checkout,
-				path.join(root, "linked-parent", "materialized"),
-			),
-		).rejects.toMatchObject({ code: "integrity_error" });
 	});
 });

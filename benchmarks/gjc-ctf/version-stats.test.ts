@@ -104,12 +104,7 @@ describe("version statistics", () => {
 	});
 	test("authorizes real signed production statistics and comparison", () => {
 		const authority = authorizedVersionStatsRequest();
-		const identity = {
-			...authority.identity,
-			harnessDigest: authority.manifest.skill.loaderDigest,
-			toolchainDigest: authority.manifest.skill.buildDigest,
-		};
-		const baseline = { ...authority, identity };
+		const baseline = authority;
 		const candidate = baseline;
 		const baselineResult = computeVersionStats(baseline);
 		expect(baselineResult).toMatchObject({ status: "ready" });
@@ -121,18 +116,15 @@ describe("version statistics", () => {
 	test("rejects harness and toolchain lineage drift", () => {
 		const authority = authorizedVersionStatsRequest();
 		for (const identity of [
-			{ ...authority.identity, harnessDigest: authority.manifest.skill.loaderDigest, toolchainDigest: authority.manifest.skill.buildDigest, harnessDigestOverride: digest("other-loader") },
-			{ ...authority.identity, harnessDigest: authority.manifest.skill.loaderDigest, toolchainDigest: authority.manifest.skill.buildDigest, toolchainDigestOverride: digest("other-build") },
+			{ ...authority.identity, harnessDigest: digest("other-preflight") },
+			{ ...authority.identity, toolchainDigest: digest("other-runtime") },
+			{
+				...authority.identity,
+				harnessDigest: authority.runtimeEvidenceDigest,
+				toolchainDigest: authority.preflightReportDigest,
+			},
 		]) {
-			const { harnessDigestOverride, toolchainDigestOverride, ...base } = identity;
-			expect(computeVersionStats({
-				...authority,
-				identity: {
-					...base,
-					...(harnessDigestOverride ? { harnessDigest: harnessDigestOverride } : {}),
-					...(toolchainDigestOverride ? { toolchainDigest: toolchainDigestOverride } : {}),
-				},
-			})).toMatchObject({ status: "unavailable" });
+			expect(computeVersionStats({ ...authority, identity })).toMatchObject({ status: "unavailable" });
 		}
 	});
 	test("rejects raw reports and sealed stats from production comparison", () => {

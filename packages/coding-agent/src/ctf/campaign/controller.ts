@@ -64,6 +64,7 @@ export type CtfCampaignOptions = Readonly<{
 	store: CtfStateStoreLike;
 	backend: CtfSolverBackend;
 	authorityFor: Parameters<typeof scheduleCtfRuns>[0]["authorityFor"];
+	terminateAuthority: NonNullable<Parameters<typeof scheduleCtfRuns>[0]["terminateAuthority"]>;
 	prepareRun?: Parameters<typeof scheduleCtfRuns>[0]["prepareRun"];
 	terminatePreparation?: Parameters<typeof scheduleCtfRuns>[0]["terminatePreparation"];
 	concurrency: number;
@@ -395,6 +396,7 @@ async function runCtfCampaignWithDeadline(
 			budgetMs: Math.min(options.budgetMs ?? remainingMs, remainingMs),
 			backend: options.backend,
 			authorityFor: options.authorityFor,
+			terminateAuthority: options.terminateAuthority,
 			materializedFor: async ({ challengeId }) => {
 				const context = materialized.get(challengeId);
 				if (context === undefined)

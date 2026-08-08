@@ -1,6 +1,6 @@
 import * as z from "zod/v4";
 import { DigestSchema } from "../../packages/coding-agent/src/ctf/contracts/common";
-import { canonicalDigest, canonicalJson, digestsEqual, type Digest } from "../../packages/coding-agent/src/ctf/contracts/digest";
+import { canonicalDigest, canonicalJson, digestsEqual, isDigest, type Digest } from "../../packages/coding-agent/src/ctf/contracts/digest";
 import { CtfError } from "../../packages/coding-agent/src/ctf/contracts/errors";
 import { nearestRank, passAtK, validateMetricsReport, type MetricRunRecord, type MetricsReportV1 } from "../../packages/coding-agent/src/ctf/contracts/metrics";
 import { validateBenchmarkLock, validateBenchmarkManifest } from "../../packages/coding-agent/src/ctf/contracts/benchmark";
@@ -152,14 +152,18 @@ function assertProductionIdentity(identity: VersionStatsIdentity, request: Recor
 	const manifest = validateBenchmarkManifest(request.manifest);
 	const lock = validateBenchmarkLock(request.lock);
 	const calibration = validateBenchmarkCalibration(request.calibration, { requireBenchmark: true });
+	const preflightReportDigest = request.preflightReportDigest;
+	const runtimeEvidenceDigest = request.runtimeEvidenceDigest;
 	if (
+		!isDigest(preflightReportDigest) ||
+		!isDigest(runtimeEvidenceDigest) ||
 		identity.corpusDigest !== lock.corpusDigest ||
 		identity.modelFingerprint !== lock.modelConfigDigest ||
 		identity.backendFingerprint !== lock.backendPolicyDigest ||
 		identity.calibrationDigest !== calibration.calibrationDigest ||
 		identity.benchmarkLockDigest !== lock.lockDigest ||
-		identity.harnessDigest !== manifest.skill.loaderDigest ||
-		identity.toolchainDigest !== manifest.skill.buildDigest ||
+		identity.harnessDigest !== preflightReportDigest ||
+		identity.toolchainDigest !== runtimeEvidenceDigest ||
 		identity.effectiveSkillDigest !== canonicalDigest(manifest.skill) ||
 		report.runs.length === 0 ||
 		report.runs.some(run => run.effectiveSkillDigest !== identity.effectiveSkillDigest)
