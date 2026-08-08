@@ -1,4 +1,6 @@
 export * from "./analyzers/endians";
+export * from "./analyzers/lactf";
+export * from "./analyzers/not-so-lazy-trigrams";
 export * from "./analyzers/lactf-tier1";
 export * from "./analyzers/ooo-recurrence";
 export * from "./analyzers/regex-grid";

@@ -12,7 +12,7 @@ import { LACTF_CORPUS_SOURCES } from "../corpus";
 type SolverCategory = "misc" | "reverse" | "crypto" | "pwn" | "web";
 type EvaluationAdapterKind = "offline-checker" | "process-service" | "browser-session";
 type ThinkingLevel = "medium" | "high";
-type AnalyzerId = "endians" | "ooo-recurrence" | "regex-grid-z3";
+type AnalyzerId = "endians" | "ooo-recurrence" | "regex-grid-z3" | "not-so-lazy-trigrams";
 
 export type SolverAttemptLimits = Readonly<{
 	wallClockMs: number;
@@ -158,7 +158,7 @@ export const LACTF_SOLVER_ROUTES: readonly SolverRoute[] = Object.freeze([
 		challengeId: "lactf-2026-crypto-not-so-lazy-trigrams",
 		category: "crypto",
 		adapterKind: "offline-checker",
-		analyzerIds: [],
+		analyzerIds: ["not-so-lazy-trigrams"],
 		modelPattern: "gpt-5",
 		thinkingLevel: "high",
 		attemptLimits: { wallClockMs: 90_000, cpuTimeMs: 60_000, memoryMiB: 1_024 },

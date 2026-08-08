@@ -46,12 +46,11 @@ describe("LA CTF solver route registry", () => {
 		expect(solverRouteFor("lactf-2026-misc-endians").analyzerIds).toEqual(["endians"]);
 		expect(solverRouteFor("lactf-2026-rev-ooo").analyzerIds).toEqual(["ooo-recurrence"]);
 		expect(solverRouteFor("lactf-2026-rev-flag-finder").analyzerIds).toEqual(["regex-grid-z3"]);
+		expect(solverRouteFor("lactf-2026-crypto-not-so-lazy-trigrams").analyzerIds).toEqual(["not-so-lazy-trigrams"]);
 		expect(
 			LACTF_SOLVER_ROUTES.filter(
 				route =>
-					route.challengeId !== "lactf-2026-misc-endians" &&
-					route.challengeId !== "lactf-2026-rev-ooo" &&
-					route.challengeId !== "lactf-2026-rev-flag-finder",
+					route.challengeId === "lactf-2026-pwn-tic-tac-no" || route.challengeId === "lactf-2026-web-single-trust",
 			).every(route => route.analyzerIds.length === 0),
 		).toBe(true);
 	});
