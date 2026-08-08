@@ -16,6 +16,7 @@ const CHALLENGE_ID = "lactf-2026-pwn-tic-tac-no";
 const TEST_CHALLENGE_ID = "test-only-rootless-podman-provider";
 const MAX_BYTES = 64 * 1024;
 const REAP_TIMEOUT_MS = 250;
+const CONTROL_TIMEOUT_MS = 2_000;
 
 type ChildEvent = "spawn" | "exit" | "error" | "data";
 type ChildListener = (...args: unknown[]) => void;
@@ -65,7 +66,26 @@ export type RootlessPodmanProviderTestHarness = Readonly<{
 }>;
 
 function environment(): Readonly<Record<string, string>> {
-	return Object.freeze({ PATH: "/usr/bin:/bin", LANG: "C", HOME: "/nonexistent" });
+	const home = os.homedir();
+	if (!path.isAbsolute(home) || home.includes("\0")) throw new Error("rootless Podman home is invalid");
+	return Object.freeze({ PATH: "/usr/bin:/bin", LANG: "C", HOME: home });
+}
+
+async function trustedHomeDirectory(): Promise<boolean> {
+	const home = os.homedir();
+	if (!path.isAbsolute(home) || home.includes("\0")) return false;
+	const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+	try {
+		const stat = await fs.lstat(home);
+		return (
+			stat.isDirectory() &&
+			!stat.isSymbolicLink() &&
+			(uid === undefined || stat.uid === uid) &&
+			(await fs.realpath(home)) === home
+		);
+	} catch {
+		return false;
+	}
 }
 
 function sha256(bytes: Uint8Array): string {
@@ -104,7 +124,7 @@ function ownChild(child: PodmanChild): OwnedChild {
 	return Object.freeze({ child, spawned: spawned.promise, terminal: terminal.promise });
 }
 
-async function reap(owned: OwnedChild): Promise<void> {
+async function reap(owned: OwnedChild, timeoutMs = REAP_TIMEOUT_MS): Promise<void> {
 	let killTimer: ReturnType<typeof setTimeout> | undefined;
 	let failTimer: ReturnType<typeof setTimeout> | undefined;
 	try {
@@ -116,7 +136,7 @@ async function reap(owned: OwnedChild): Promise<void> {
 						owned.child.kill("SIGKILL");
 					} catch {}
 					failTimer = setTimeout(() => reject(new Error("Podman child did not reap")), REAP_TIMEOUT_MS);
-				}, REAP_TIMEOUT_MS);
+				}, timeoutMs);
 			}),
 		]);
 	} finally {
@@ -162,6 +182,7 @@ async function helper(
 	argv: readonly string[],
 	cwd?: string,
 	captureOutput = false,
+	timeoutMs = REAP_TIMEOUT_MS,
 ): Promise<Readonly<{ ok: boolean; output: string }>> {
 	const owned = ownChild(
 		harness.run(podman(argv), { cwd, stdio: captureOutput ? "pipe" : "ignore", env: environment() }),
@@ -177,7 +198,7 @@ async function helper(
 	};
 	owned.child.once("exit", onExit);
 	try {
-		await reap(owned);
+		await reap(owned, timeoutMs);
 		return {
 			ok: code === 0,
 			output: Buffer.concat(chunks.map(chunk => Buffer.from(chunk)))
@@ -194,8 +215,19 @@ async function helper(
 
 async function preflight(harness: RootlessPodmanProviderTestHarness, production: boolean): Promise<boolean> {
 	if (production && (typeof process.getuid !== "function" || process.getuid() <= 0)) return false;
-	const info = await helper(harness, ["info", "--format", "{{.Host.Security.Rootless}}"], undefined, true);
-	return info.ok && info.output === "true" && (await helper(harness, ["image", "exists", IMAGE])).ok;
+	if (!(await trustedHomeDirectory())) return false;
+	const info = await helper(
+		harness,
+		["info", "--format", "{{.Host.Security.Rootless}}"],
+		undefined,
+		true,
+		CONTROL_TIMEOUT_MS,
+	);
+	return (
+		info.ok &&
+		info.output === "true" &&
+		(await helper(harness, ["image", "exists", IMAGE], undefined, false, CONTROL_TIMEOUT_MS)).ok
+	);
 }
 function validContainerName(value: string): boolean {
 	return /^gjc-ctf-[a-f0-9]{32}$/u.test(value);
@@ -233,7 +265,7 @@ async function readContainerId(cidfile: string): Promise<string | undefined> {
 }
 
 async function awaitContainerId(generation: Generation, signal: AbortSignal): Promise<string> {
-	const deadline = Date.now() + REAP_TIMEOUT_MS;
+	const deadline = Date.now() + CONTROL_TIMEOUT_MS;
 	while (Date.now() < deadline) {
 		if (signal.aborted || generation.cidfile === undefined) throw new Error("rootless Podman start cancelled");
 		const id = await readContainerId(generation.cidfile);

@@ -71,6 +71,17 @@ The Tic-Tac-No route exposes canonical base64 process I/O and a bounded in-memor
 
 The rootless Podman provider is an opt-in composition surface. It requires the exact pinned image to exist locally and uses `--pull=never`; absence fails closed rather than pulling or falling back to host execution. The provider must remain rootless, local-only, network-disabled, digest-bound, resource-bounded, and container-identity-aware.
 
+Install the reviewed image explicitly before enabling the provider; this is an operator action, not a solver fallback:
+
+```sh
+podman --remote=false pull \
+  docker.io/library/debian@sha256:b5ace515e78743215a1b101a6f17e59ed74b17132139ca3af3c37e605205e973
+podman --remote=false image exists \
+  docker.io/library/debian@sha256:b5ace515e78743215a1b101a6f17e59ed74b17132139ca3af3c37e605205e973
+```
+
+The provider still launches with `--pull=never`. It validates a canonical non-root home before consulting the rootless local image store and gives fixed control operations a two-second bound; it never searches another store or falls back to host execution.
+
 ### Web diagnostics
 
 The web route remains disabled unless a trusted driver supplies a one-shot opaque authority bound to the exact run and canonical `http://127.0.0.1:<port>` origin. `localhost`, alternate IP forms, credentials, external networking, downloads, raw CDP, service workers, and filesystem disclosure are not accepted substitutes.

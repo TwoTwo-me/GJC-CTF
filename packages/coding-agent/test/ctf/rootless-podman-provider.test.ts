@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import { PassThrough } from "node:stream";
 import {
 	createRootlessPodmanProvider,
@@ -75,6 +76,37 @@ describe("rootless Podman provider", () => {
 		expect(production.challengeId).toBe("lactf-2026-pwn-tic-tac-no");
 		expect(diagnostic.challengeId).not.toBe(production.challengeId);
 		expect(diagnostic.routeDigest).not.toBe(production.routeDigest);
+	});
+
+	it("uses the canonical user home and allows a bounded slow preflight", async () => {
+		let observedHome: string | undefined;
+		const harness: RootlessPodmanProviderTestHarness = {
+			run(argv, options) {
+				observedHome = options.env.HOME;
+				const child = new FakeChild();
+				if (argv[1] === "info") {
+					setTimeout(() => {
+						child.stdout.write("true\n");
+						child.emit("exit", 0);
+					}, 300);
+				} else if (argv[1] === "image" || argv[1] === "rm") {
+					queueMicrotask(() => child.emit("exit", 0));
+				} else {
+					const cidfile = argv[argv.indexOf("--cidfile") + 1]!;
+					queueMicrotask(() => {
+						void fs.writeFile(cidfile, "a".repeat(64)).then(
+							() => child.emit("spawn"),
+							error => child.emit("error", error),
+						);
+					});
+				}
+				return child;
+			},
+		};
+		const acquisition = createRootlessPodmanProviderTestHarness(harness).open(request());
+		const service = await acquisition.service;
+		expect(observedHome).toBe(await fs.realpath(os.homedir()));
+		await Promise.all([service.close(), acquisition.terminate()]);
 	});
 
 	it("uses the full fixed local/rootless argv and supports serialized restart", async () => {
