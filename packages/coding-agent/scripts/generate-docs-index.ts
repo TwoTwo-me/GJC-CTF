@@ -15,11 +15,12 @@ async function pathExists(candidate: string): Promise<boolean> {
 
 async function findDocsDir(): Promise<string | undefined> {
 	let current = path.resolve(import.meta.dir);
+	let outermost: string | undefined;
 	while (true) {
 		const docsDir = path.join(current, "docs");
-		if (await pathExists(docsDir)) return docsDir;
+		if (await pathExists(docsDir)) outermost = docsDir;
 		const parent = path.dirname(current);
-		if (parent === current) return undefined;
+		if (parent === current) return outermost;
 		current = parent;
 	}
 }

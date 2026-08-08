@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "gjc-ctf-pinned-flag-finder-z3-candidate-1",
+  "generatedAt": "2026-08-08T16:30:49Z",
+  "status": "constraint-valid-candidate",
+  "codeCommit": "71d0f68b9c9135b64061e2b3b124c8403d33aaf9",
+  "challengeId": "lactf-2026-rev-flag-finder",
+  "source": {
+    "repositoryUrl": "https://github.com/uclaacm/lactf-archive",
+    "sourceCommit": "3379d4a7b36680764a34e7dc817cc3c94c244764",
+    "challengePath": "2026/rev/flag-finder",
+    "visibleFile": "src/script.js",
+    "sha256": "6494adb9e328f453a6bb6257a4eb8bc720d250296cced5d22e822276aebb4552"
+  },
+  "analyzer": {
+    "id": "regex-grid-z3",
+    "candidateDigest": "f8f6316385ae9df21b92f5f23a8f1188b0342ae148ec8eb018e8d26863123b78",
+    "candidateLength": 1919,
+    "constraintShape": "19x101 bounded nonogram",
+    "wallMs": 13165
+  },
+  "solver": {
+    "name": "z3",
+    "version": "Z3 version 4.8.12 - 64 bit",
+    "executableDigest": "c05be002097e2f2106efeeac03e58032e3f5cca10104f95d7a0ddc0bd3f907cb",
+    "reviewedContentAddressedCopy": true
+  },
+  "authority": {
+    "candidatePlaintextRetained": false,
+    "archiveFlagRead": false,
+    "officialSolutionUsed": false,
+    "parsedConstraintReplayPassed": true,
+    "independentlyVerified": false,
+    "trustedOracleUsed": false,
+    "scored": false,
+    "tierPromotionAuthorized": false
+  }
+}

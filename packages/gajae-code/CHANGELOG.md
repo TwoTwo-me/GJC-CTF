@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- Added the public `gjc-ctf` executable wrapper so the CTF harness is available from the unscoped package installation.
+
 ## [0.12.15] - 2026-08-06
 
 ## [0.12.14] - 2026-08-06

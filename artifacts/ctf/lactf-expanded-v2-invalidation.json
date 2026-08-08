@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "gjc-ctf-campaign-invalidation-1",
+  "campaignId": "lactf-2026-expanded-v2",
+  "invalidatedCampaignStateDigest": "3a834bd5cbb0a988e8c948ea454255d22ec3d3851b8617a64f6c1d920376e557",
+  "invalidatedAt": "2026-08-08T07:32:43Z",
+  "reasonCode": "clean_room_allowlist_exposed_plaintext_source",
+  "challengeId": "lactf-2026-crypto-not-so-lazy-trigrams",
+  "removedVisiblePath": "pt.txt",
+  "replacementVisibleFiles": [
+    "chall.py",
+    "ct.txt"
+  ],
+  "candidateOrFlagContentIncluded": false,
+  "scored": false,
+  "independentlyVerifiedSolves": 0,
+  "tierExpansionAuthorized": false,
+  "disposition": "The prior campaign and derived version observations are retained only as invalidated audit history. They must not be used for benchmark, solver-quality, tier-promotion, or clean-room claims. A new campaign requires fresh materialization and provenance under the corrected allowlist."
+}

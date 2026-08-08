@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { type AssistantMessage, getBundledModel } from "@gajae-code/ai";
 import type { Rule } from "@gajae-code/coding-agent/capability/rule";
 import { Settings } from "@gajae-code/coding-agent/config/settings";
-import type { ExtensionFactory } from "@gajae-code/coding-agent/extensibility/extensions";
+import type { CustomTool, ExtensionFactory } from "@gajae-code/coding-agent/extensibility/extensions";
 import { LocalProtocolHandler, resolveLocalRoot, resolveLocalUrlToPath } from "@gajae-code/coding-agent/internal-urls";
 import { AgentRegistry } from "@gajae-code/coding-agent/registry/agent-registry";
 import { createAgentSession } from "@gajae-code/coding-agent/sdk";
@@ -13,6 +13,7 @@ import { createSecretObfuscator } from "@gajae-code/coding-agent/secrets";
 import type { AgentSession } from "@gajae-code/coding-agent/session/agent-session";
 import { SessionManager } from "@gajae-code/coding-agent/session/session-manager";
 import { getSessionsDir, Snowflake } from "@gajae-code/utils";
+import * as z from "zod/v4";
 import { discoverAuthStorage } from "../src/sdk/session";
 import { AgentStorage } from "../src/session/agent-storage";
 
@@ -737,5 +738,90 @@ describe("createAgentSession session storage isolation", () => {
 				await session.dispose();
 			}
 		});
+	});
+	it("strictly isolates supplied tools and process-global coordination state", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-strict-isolation-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, "project");
+		const coordinatorStateFile = path.join(cwd, ".gjc", "state", "coordinator-runtime.json");
+		const previousCoordinatorStateFile = process.env.GJC_COORDINATOR_SESSION_STATE_FILE;
+		const registry = AgentRegistry.global();
+		const mainRef = registry.register({
+			id: "0-Main",
+			displayName: "existing main",
+			kind: "main",
+			session: null,
+			sessionFile: null,
+		});
+		const manager = SessionManager.inMemory(cwd);
+		const inertTool: CustomTool = {
+			name: "strict_inert_tool",
+			label: "Strict inert tool",
+			description: "A test-only inert tool",
+			parameters: z.object({}),
+			async execute() {
+				return { content: [{ type: "text", text: "inert" }] };
+			},
+		};
+		let session: AgentSession | undefined;
+
+		process.env.GJC_COORDINATOR_SESSION_STATE_FILE = coordinatorStateFile;
+		try {
+			fs.mkdirSync(cwd, { recursive: true });
+
+			await expect(
+				createAgentSession({
+					cwd,
+					sessionManager: SessionManager.inMemory(cwd),
+					strictToolIsolation: true,
+					agentRegistry: registry,
+				}),
+			).rejects.toThrow("strict tool isolation rejects agent identity and additive SDK integration surfaces");
+			await expect(
+				createAgentSession({
+					cwd,
+					sessionManager: SessionManager.inMemory(cwd),
+					strictToolIsolation: true,
+					agentId: "strict-test-agent",
+				}),
+			).rejects.toThrow("strict tool isolation rejects agent identity and additive SDK integration surfaces");
+
+			const result = await createAgentSession({
+				cwd,
+				sessionManager: manager,
+				strictToolIsolation: true,
+				toolNames: [],
+				customTools: [inertTool],
+				settings: Settings.isolated(),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			});
+			session = result.session;
+
+			expect(session.sessionManager).toBe(manager);
+			expect(manager.getCwd()).toBe(cwd);
+			expect(manager.getSessionFile()).toBeUndefined();
+			expect(session.agent.state.tools.map(tool => tool.name)).toEqual([inertTool.name]);
+			expect(registry.get("0-Main")).toBe(mainRef);
+			expect(fs.existsSync(coordinatorStateFile)).toBe(false);
+		} finally {
+			try {
+				await session?.dispose();
+				expect(registry.get("0-Main")).toBe(mainRef);
+				expect(fs.existsSync(coordinatorStateFile)).toBe(false);
+			} finally {
+				registry.unregister("0-Main");
+				if (previousCoordinatorStateFile === undefined) delete process.env.GJC_COORDINATOR_SESSION_STATE_FILE;
+				else process.env.GJC_COORDINATOR_SESSION_STATE_FILE = previousCoordinatorStateFile;
+			}
+		}
+
+		// File mentions are only expanded after model/API-key preflight, so their
+		// disabled strict-mode behavior cannot be exercised without a provider call.
 	});
 });

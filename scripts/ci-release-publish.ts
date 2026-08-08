@@ -19,6 +19,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -84,6 +85,85 @@ export const NPM_RELEASE_TAG = "latest";
 const npmRegistryOrigin = new URL(NPM_REGISTRY_URL).origin;
 const maxTarballRedirects = 3;
 const releaseSerializationKeyPattern = /^[a-z0-9][a-z0-9._/-]{7,127}$/u;
+const codingAgentPackageDir = "packages/coding-agent";
+const codingAgentCanonicalCtfMemberPaths = [
+	"src/ctf/dashboard/embedded-client.generated.txt",
+	"bin/gjc-ctf.js",
+] as const;
+interface CanonicalPackageMember {
+	path: string;
+	bytes: Buffer;
+}
+
+function tarString(bytes: Uint8Array): string {
+	const terminator = bytes.indexOf(0);
+	return Buffer.from(terminator === -1 ? bytes : bytes.subarray(0, terminator)).toString("utf8");
+}
+
+function tarSize(header: Uint8Array): number {
+	const encoded = tarString(header.subarray(124, 136)).trim();
+	if (!/^[0-7]+$/u.test(encoded)) throw new Error("CTF tarball member has an invalid size");
+	const size = Number.parseInt(encoded, 8);
+	if (!Number.isSafeInteger(size)) throw new Error("CTF tarball member has an unsafe size");
+	return size;
+}
+
+/** Fails closed unless every staged CTF entry is present, nonempty, and byte-canonical. */
+export function assertCanonicalCodingAgentCtfTarballMembers(
+	tarball: Uint8Array,
+	canonicalMembers: readonly CanonicalPackageMember[],
+): void {
+	const expected = new Map(canonicalMembers.map(member => [member.path, member]));
+	const seen = new Set<string>();
+	const tar = gunzipSync(tarball);
+	let terminated = false;
+	for (let offset = 0; offset < tar.length;) {
+		if (offset + 512 > tar.length) throw new Error("CTF tarball is truncated before its terminator");
+		const header = tar.subarray(offset, offset + 512);
+		if (header.every(byte => byte === 0)) {
+			terminated = true;
+			break;
+		}
+		const prefix = tarString(header.subarray(345, 500));
+		const name = tarString(header.subarray(0, 100));
+		const memberPath = prefix === "" ? name : `${prefix}/${name}`;
+		const size = tarSize(header);
+		const dataOffset = offset + 512;
+		const paddedSize = Math.ceil(size / 512) * 512;
+		if (dataOffset + paddedSize > tar.length) throw new Error(`CTF tarball member ${memberPath} is truncated`);
+		const relativePath = memberPath.startsWith("package/") ? memberPath.slice("package/".length) : memberPath;
+		const canonicalMember = expected.get(relativePath);
+		if (canonicalMember !== undefined) {
+			if (header[156] !== 0 && header[156] !== "0".charCodeAt(0)) {
+				throw new Error(`CTF tarball member ${relativePath} is not a regular file`);
+			}
+			const data = tar.subarray(dataOffset, dataOffset + size);
+			if (data.length === 0 || canonicalMember.bytes.length === 0) {
+				throw new Error(`CTF tarball member ${relativePath} must be nonempty`);
+			}
+			if (seen.has(relativePath)) throw new Error(`CTF tarball contains duplicate member ${relativePath}`);
+			if (!data.equals(canonicalMember.bytes)) throw new Error(`CTF tarball member ${relativePath} does not match its canonical source`);
+			seen.add(relativePath);
+		}
+		offset = dataOffset + paddedSize;
+	}
+	if (!terminated) throw new Error("CTF tarball is missing its terminator");
+	for (const member of canonicalMembers) {
+		if (!seen.has(member.path)) throw new Error(`CTF tarball is missing canonical member ${member.path}`);
+	}
+}
+
+async function stageCanonicalCodingAgentCtfMembers(pkg: PublishPackage, copiedPackageDir: string): Promise<readonly CanonicalPackageMember[]> {
+	if (pkg.dir !== codingAgentPackageDir) return [];
+	const members = await Promise.all(codingAgentCanonicalCtfMemberPaths.map(async memberPath => {
+		const source = path.join(repoRoot, pkg.dir, memberPath);
+		const bytes = await fs.readFile(source);
+		if (bytes.length === 0) throw new Error(`Canonical CTF source ${memberPath} must be nonempty`);
+		await fs.copyFile(source, path.join(copiedPackageDir, memberPath));
+		return { path: memberPath, bytes };
+	}));
+	return members;
+}
 
 
 export type ReleasePublishCli =
@@ -489,12 +569,15 @@ async function packPackageTwice(pkg: PublishPackage): Promise<Buffer> {
 			const copiedPackageDir = path.join(temporaryRoot, "package");
 			const packOutputDir = path.join(temporaryRoot, "tarballs");
 			await fs.cp(pkgDir, copiedPackageDir, { recursive: true, force: false, errorOnExist: true });
+			const canonicalCtfMembers = await stageCanonicalCodingAgentCtfMembers(pkg, copiedPackageDir);
 			await fs.mkdir(packOutputDir);
 			const result = await $`npm pack --ignore-scripts --json --pack-destination ${packOutputDir}`.cwd(copiedPackageDir).quiet().nothrow();
 			if (result.exitCode !== 0) throw new Error(`npm pack failed for ${pkg.dir}: ${outputOf(result)}`);
 			const outputs = (await fs.readdir(packOutputDir)).filter(file => file.endsWith(".tgz"));
 			if (outputs.length !== 1) throw new Error(`npm pack produced ${outputs.length} tarballs for ${pkg.dir}, expected one`);
-			canonicalTarballs.push(canonicalizePackageTarball(await fs.readFile(path.join(packOutputDir, outputs[0]!))));
+			const tarball = await fs.readFile(path.join(packOutputDir, outputs[0]!));
+			if (canonicalCtfMembers.length > 0) assertCanonicalCodingAgentCtfTarballMembers(tarball, canonicalCtfMembers);
+			canonicalTarballs.push(canonicalizePackageTarball(tarball));
 		} finally {
 			await fs.rm(temporaryRoot, { recursive: true, force: true });
 		}

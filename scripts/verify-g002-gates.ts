@@ -23,8 +23,8 @@ const ALLOWED_PRIVATE_PACKAGE_VERSIONS = new Map<string, string>([
 const ALLOWED_UNSCOPED_PACKAGE_NAMES = new Set<string>(["gajae-code"]);
 const ALLOWED_PACKAGE_BINARIES = new Map<string, readonly string[]>([
 	["@gajae-code/ai", ["pi-ai"]],
-	["@gajae-code/coding-agent", ["gjc"]],
-	["gajae-code", ["gjc"]],
+	["@gajae-code/coding-agent", ["gjc", "gjc-ctf"]],
+	["gajae-code", ["gjc", "gjc-ctf"]],
 	["@gajae-code/stats", ["gjc-stats"]],
 	["@gajae-code/typescript-edit-benchmark", ["typescript-edit-benchmark"]],
 ]);

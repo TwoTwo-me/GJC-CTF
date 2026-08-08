@@ -809,10 +809,12 @@ describe("native gjc team runtime", () => {
 		const posix = buildWorkerCommand(config, worker, "linux");
 		expect(posix).toContain("GJC_SESSION_ID='owner-'\\''$(echo hostile)'");
 		expect(posix).toContain("GJC_SPAWNED_BY_SESSION='foreign-session'");
+		expect(posix).toContain("--session-dir '/state/identity-team/worker-sessions/worker-1'");
 
 		const windows = buildWorkerCommand(config, worker, "win32");
 		expect(windows).toContain("$env:GJC_SESSION_ID = 'owner-''$(echo hostile)';");
 		expect(windows).toContain("$env:GJC_SPAWNED_BY_SESSION = 'foreign-session';");
+		expect(windows).toContain("--session-dir '/state/identity-team/worker-sessions/worker-1'");
 	});
 
 	it("omits owning session identity instead of falling back to foreign provenance", () => {
@@ -1008,11 +1010,15 @@ describe("native gjc team runtime", () => {
 		}
 	});
 
-	it("parses team starts with automatic detached worktrees and legacy --worktree stripping", () => {
+	it("parses team starts with automatic detached worktrees and explicit workspace modes", () => {
 		const defaultStart = parseTeamLaunchArgs(["executor", "build", "feature"]);
 		expect(defaultStart.worktreeMode).toEqual({ enabled: true, detached: true, name: null });
 		expect(defaultStart.workerCount).toBe(3);
 		expect(defaultStart.task).toBe("build feature");
+		const direct = parseTeamLaunchArgs(["--no-worktree", "2:executor", "build", "feature"]);
+		expect(direct.worktreeMode).toEqual({ enabled: false });
+		expect(direct.workerCount).toBe(2);
+		expect(direct.task).toBe("build feature");
 
 		const multi = parseTeamLaunchArgs(["2:executor", "build", "feature"]);
 		expect(multi.workerCount).toBe(2);
@@ -1087,7 +1093,8 @@ describe("native gjc team runtime", () => {
 				? "$env:GJC_TEAM_WORKER = 'worktree-team/worker-1'"
 				: "GJC_TEAM_WORKER='worktree-team/worker-1'",
 		);
-		expect(tmuxLog).toContain("true 'You are worker-1 in gjc team worktree-team.");
+		expect(tmuxLog).toContain("--session-dir");
+		expect(tmuxLog).toContain("'You are worker-1 in gjc team worktree-team.");
 		expect(tmuxLog).not.toContain("send-keys -l");
 		expect(tmuxLog).toContain("select-layout -t test-session:0 main-vertical");
 		expect(tmuxLog).toContain("set-option -t test-session:0 mouse on");

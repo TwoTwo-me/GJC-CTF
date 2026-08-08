@@ -24,6 +24,7 @@
 		"gjc"
 	],
 	"bin": {
+		"gjc-ctf": "bin/gjc-ctf.js",
 		"gjc": "bin/gjc.js"
 	},
 	"dependencies": {

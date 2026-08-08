@@ -371,3 +371,28 @@ Gajae-Code includes a [`geobench`](https://github.com/NomaDamas/geobench) produc
 
 - Spec: [`geobench/gajae-code.yaml`](geobench/gajae-code.yaml)
 - Runbook: [`docs/geobench.md`](docs/geobench.md)
+## CTF operator workflow
+
+The supported source command is `bun packages/coding-agent/bin/gjc-ctf.js`. The full setup, authority, evidence, and troubleshooting procedure is in [`docs/ctf-harness.md`](docs/ctf-harness.md). The local, unscored LA CTF corpus is pinned to [`uclaacm/lactf-archive`](https://github.com/uclaacm/lactf-archive) commit `3379d4a7b36680764a34e7dc817cc3c94c244764`. It contains a first misc/reverse tier and a locked crypto/pwn/web tier; the latter expands only after every eligible active-tier challenge has an independently signed verified solve. The harness does **not** solve every challenge.
+
+```sh
+# Inspect the reviewed tool allowlist without changing the VM.
+bun packages/coding-agent/bin/gjc-ctf.js bootstrap --category essential --category reverse --json
+
+# Install explicitly selected reviewed profiles and verify every binary.
+bun packages/coding-agent/bin/gjc-ctf.js bootstrap --category essential --category reverse --apply --json
+
+bun packages/coding-agent/bin/gjc-ctf.js init ./competition --json
+bun packages/coding-agent/bin/gjc-ctf.js status --json
+bun packages/coding-agent/bin/gjc-ctf.js dashboard --port 0
+
+# After `bun --cwd=packages/coding-agent run build`, use the standalone binary.
+packages/coding-agent/dist/gjc-ctf --help
+packages/coding-agent/dist/gjc-ctf bootstrap --category essential --category reverse --json
+```
+
+Bootstrap accepts only the source-bundled reviewed allowlist; apply mode requires explicit categories and post-install version verification. The stock CLI has no implicitly trusted backend, permission authority, calibration, runtime preflight, or independent oracle, so it refuses rather than claiming a solve. Programmatic integrations compose reviewed analyzers, `createProductionGjcLocalSolverSessionFactory`, `createLocalCtfSolverBackend`, and `runCtfCampaign` for bounded candidate work over digest-bound allowlisted files. The fixed solver-work stop is `2026-08-09T00:00:00Z` (`2026-08-09 09:00 KST`).
+
+The prior expanded-v2 campaign digest `3a834bd5cbb0a988e8c948ea454255d22ec3d3851b8617a64f6c1d920376e557` is invalidated by `artifacts/ctf/lactf-expanded-v2-invalidation.json` because the crypto materialization allowlist exposed an unnecessary plaintext source. The corrected allowlist contains only `chall.py` and `ct.txt`; old candidate/failure counts are audit history, not benchmark or solver-quality evidence. Archive flags, official solves, hidden metadata, and candidate contents remain prohibited evidence; do not contact remote hosts without authorization.
+The source-bound Tier 1 diagnostic at `artifacts/ctf/lactf-tier1-local-evidence-v1.json` records three local-checker passes with ephemeral Ed25519 integrity and candidate digests only. It is deliberately non-scored and does not authorize tier expansion; the benchmark still requires independent pre-authorized oracle, permission, calibration, and runtime evidence.
+The current release/harness receipt is `artifacts/ctf/ctf-harness-v3-evidence.json`; it records 281 passing focused tests, compiled binary hashes, bootstrap/init/status smoke, and zero CTF type diagnostics while explicitly keeping the benchmark unavailable. `artifacts/ctf/lactf-version-observation-v2.json` is the version-by-version statistics record: it marks expanded-v2 invalid, retains Tier 1 as diagnostic-only, and records v3 as verified harness plumbing with zero independently verified solves.

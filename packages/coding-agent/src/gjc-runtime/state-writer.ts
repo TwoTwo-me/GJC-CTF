@@ -92,6 +92,7 @@ export interface WorkflowTransactionJournal {
 
 export type StateWritePolicy = "source" | "cache";
 
+export type StateWriterDurability = "default" | "ctf";
 export interface GuardedStateWriterOptions extends StateWriterOptions {
 	policy: StateWritePolicy;
 	expectedRevision?: number;
@@ -104,9 +105,16 @@ export type GuardedWriteResult =
 
 export interface StateWriterOptions {
 	cwd?: string;
+	root?: string;
 	receipt?: StateWriterReceiptContext;
 	audit?: StateWriterAuditContext;
 	sourceRevision?: number;
+	/**
+	 * Explicit durability profile. The existing default profile intentionally
+	 * retains the historical write/rename/append behaviour; the CTF profile
+	 * adds file and parent-directory durability barriers before acknowledgement.
+	 */
+	durability?: StateWriterDurability;
 	/**
 	 * Cross-process lock tuning for read-modify-write paths that route through
 	 * `withWorkflowStateLock` / `updateJsonAtomic`. Omit for the hardened
@@ -212,16 +220,66 @@ function cwdForOptions(options?: StateWriterOptions): string {
 	return path.resolve(options?.cwd ?? process.cwd());
 }
 
-function resolveGjcTarget(targetPath: string, cwd = process.cwd()): string {
+function resolveGjcTarget(targetPath: string, cwd = process.cwd(), root?: string): string {
 	if (!targetPath.trim()) throw new Error("targetPath is required");
 	const projectRoot = path.resolve(cwd);
-	const gjcRoot = path.join(projectRoot, ".gjc");
+	const gjcRoot = path.resolve(root ?? path.join(projectRoot, ".gjc"));
 	const resolved = path.resolve(projectRoot, targetPath);
 	const relative = path.relative(gjcRoot, resolved);
 	if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
-		throw new Error(`target path must be within project .gjc/**: ${targetPath}`);
+		throw new Error(`target path must be within ${root ? "configured storage root" : "project .gjc/**"}: ${targetPath}`);
 	}
 	return resolved;
+}
+
+function pathWithinRoot(root: string, candidate: string): boolean {
+	const relative = path.relative(root, candidate);
+	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+async function realpathWithMissingLeaf(target: string): Promise<string> {
+	const suffix: string[] = [];
+	let current = target;
+	for (;;) {
+		try {
+			const resolved = await fs.realpath(current);
+			return path.join(resolved, ...suffix);
+		} catch (error) {
+			if (!isErrno(error, "ENOENT")) throw error;
+			try {
+				const stat = await fs.lstat(current);
+				if (stat.isSymbolicLink()) {
+					throw new Error(`refusing symlink target with missing destination: ${target}`);
+				}
+			} catch (lstatError) {
+				if (!isErrno(lstatError, "ENOENT")) throw lstatError;
+			}
+			const parent = path.dirname(current);
+			if (parent === current) return path.resolve(current, ...suffix);
+			suffix.unshift(path.basename(current));
+			current = parent;
+		}
+	}
+}
+
+async function assertSafeGjcTarget(filePath: string, options?: StateWriterOptions): Promise<void> {
+	const cwd = cwdForOptions(options);
+	const lexicalRoot = path.resolve(options?.root ?? path.join(cwd, ".gjc"));
+	const [safeRoot, safeTarget] = await Promise.all([
+		realpathWithMissingLeaf(lexicalRoot),
+		realpathWithMissingLeaf(filePath),
+	]);
+	if (!pathWithinRoot(safeRoot, safeTarget)) {
+		throw new Error(
+			`target path escapes configured storage root after realpath resolution: ${filePath}`,
+		);
+	}
+}
+
+async function resolveSafeGjcTarget(targetPath: string, options?: StateWriterOptions): Promise<string> {
+	const filePath = resolveGjcTarget(targetPath, cwdForOptions(options), options?.root);
+	await assertSafeGjcTarget(filePath, options);
+	return filePath;
 }
 
 function tempPathFor(filePath: string): string {
@@ -381,7 +439,17 @@ function buildActiveSnapshot(entries: SkillActiveEntry[]): SkillActiveState {
 	};
 }
 
-async function atomicRemove(filePath: string): Promise<boolean> {
+async function atomicRemove(filePath: string, durability: StateWriterDurability = "default"): Promise<boolean> {
+	if (durability === "ctf") {
+		try {
+			await fs.unlink(filePath);
+			await syncDirectoryChain(path.dirname(filePath));
+			return true;
+		} catch (error) {
+			if (isErrno(error, "ENOENT")) return false;
+			throw error;
+		}
+	}
 	const tmpPath = tempPathFor(filePath);
 	try {
 		await fs.rename(filePath, tmpPath);
@@ -392,7 +460,6 @@ async function atomicRemove(filePath: string): Promise<boolean> {
 	await fs.rm(tmpPath, { force: true });
 	return true;
 }
-
 async function readJsonIfPresent(filePath: string): Promise<unknown | undefined> {
 	try {
 		return JSON.parse(await fs.readFile(filePath, "utf-8"));
@@ -463,8 +530,12 @@ function stampWorkflowEnvelopeRevisionAndChecksum(
 
 function buildReceipt(options: StateWriterOptions | undefined): WorkflowStateReceipt | undefined {
 	if (!options?.receipt) return undefined;
+	const receiptCwd = path.resolve(options.receipt.cwd ?? options.cwd ?? process.cwd());
+	if (options.root && !pathWithinRoot(path.resolve(options.root), path.join(receiptCwd, ".gjc"))) {
+		return undefined;
+	}
 	const receipt = buildWorkflowStateReceipt({
-		cwd: path.resolve(options.receipt.cwd ?? options.cwd ?? process.cwd()),
+		cwd: receiptCwd,
 		skill: options.receipt.skill,
 		owner: options.receipt.owner,
 		command: options.receipt.command,
@@ -483,7 +554,11 @@ async function maybeAudit(mutatedPath: string, options?: StateWriterOptions): Pr
 	if (!options?.audit) return;
 	const audit = options.audit;
 	const cwd = path.resolve(audit.cwd ?? options.cwd ?? process.cwd());
-	await appendAuditEntry(cwd, options?.audit?.sessionId ?? "", {
+	const auditPath = path.resolve(layoutAuditPath(cwd, audit.sessionId ?? ""));
+	if (options.root && !pathWithinRoot(path.resolve(options.root), auditPath)) {
+		return;
+	}
+	await appendAuditEntry(cwd, audit.sessionId ?? "", {
 		ts: new Date().toISOString(),
 		skill: audit.skill,
 		category: audit.category,
@@ -494,20 +569,61 @@ async function maybeAudit(mutatedPath: string, options?: StateWriterOptions): Pr
 		to_phase: audit.toPhase,
 		forced: audit.forced ?? false,
 		paths: [mutatedPath],
-	});
+	}, options);
 }
 
-async function atomicWrite(filePath: string, content: string): Promise<string> {
+async function atomicWrite(
+	filePath: string,
+	content: string,
+	durability: StateWriterDurability = "default",
+): Promise<string> {
 	await fs.mkdir(path.dirname(filePath), { recursive: true });
 	const tmpPath = tempPathFor(filePath);
 	try {
-		await fs.writeFile(tmpPath, content, "utf-8");
+		if (durability === "ctf") {
+			const handle = await fs.open(tmpPath, "wx", 0o600);
+			try {
+				await handle.writeFile(content, "utf-8");
+				await handle.sync();
+			} finally {
+				await handle.close();
+			}
+		} else {
+			await fs.writeFile(tmpPath, content, "utf-8");
+		}
 		await fs.rename(tmpPath, filePath);
+		if (durability === "ctf") await syncDirectoryChain(path.dirname(filePath));
 	} catch (error) {
 		await fs.rm(tmpPath, { force: true }).catch(() => undefined);
 		throw error;
 	}
 	return filePath;
+}
+async function syncDirectory(directoryPath: string): Promise<void> {
+	const handle = await fs.open(directoryPath, "r");
+	try {
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+}
+async function syncDirectoryChain(directoryPath: string): Promise<void> {
+	let current = path.resolve(directoryPath);
+	for (;;) {
+		await syncDirectory(current);
+		const parent = path.dirname(current);
+		if (parent === current) return;
+		current = parent;
+	}
+}
+async function syncAppendedFile(filePath: string): Promise<void> {
+	const handle = await fs.open(filePath, "r+");
+	try {
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+	await syncDirectoryChain(path.dirname(filePath));
 }
 
 async function writeGuardedResolvedJsonAtomic(
@@ -515,6 +631,7 @@ async function writeGuardedResolvedJsonAtomic(
 	value: unknown,
 	options: GuardedStateWriterOptions,
 ): Promise<GuardedWriteResult> {
+	await assertSafeGjcTarget(filePath, options);
 	return lockResolvedWorkflowTarget(
 		filePath,
 		async () => {
@@ -526,7 +643,7 @@ async function writeGuardedResolvedJsonAtomic(
 					throw new StateWriteConflictError(filePath, options.expectedRevision, currentRevision);
 				}
 				const next = stampStateRevision(withWorkflowReceipt(value, buildReceipt(options)), currentRevision + 1);
-				await atomicWrite(filePath, jsonText(next));
+				await atomicWrite(filePath, jsonText(next), options.durability);
 				await maybeAudit(filePath, options);
 				return { path: filePath, written: true, revision: currentRevision + 1, stamped: next };
 			}
@@ -541,7 +658,7 @@ async function writeGuardedResolvedJsonAtomic(
 				currentRevision + 1,
 				incomingSourceRevision,
 			);
-			await atomicWrite(filePath, jsonText(next));
+			await atomicWrite(filePath, jsonText(next), options.durability);
 			await maybeAudit(filePath, options);
 			return { path: filePath, written: true, revision: currentRevision + 1, stamped: next };
 		},
@@ -554,7 +671,7 @@ export async function writeGuardedJsonAtomic(
 	value: unknown,
 	options: GuardedStateWriterOptions,
 ): Promise<GuardedWriteResult> {
-	const filePath = resolveGjcTarget(targetPath, cwdForOptions(options));
+	const filePath = await resolveSafeGjcTarget(targetPath, options);
 	return writeGuardedResolvedJsonAtomic(filePath, value, options);
 }
 
@@ -563,7 +680,7 @@ export async function writeGuardedWorkflowEnvelopeAtomic(
 	value: unknown,
 	options: GuardedStateWriterOptions,
 ): Promise<GuardedWriteResult> {
-	const filePath = resolveGjcTarget(targetPath, cwdForOptions(options));
+	const filePath = await resolveSafeGjcTarget(targetPath, options);
 	const write = async (): Promise<GuardedWriteResult> => {
 		const current = await readJsonIfPresentTolerant(filePath);
 		const currentRevision = persistedStateRevision(current);
@@ -586,7 +703,7 @@ export async function writeGuardedWorkflowEnvelopeAtomic(
 						.join("; ")}`,
 				);
 			}
-			await atomicWrite(filePath, jsonText(next));
+			await atomicWrite(filePath, jsonText(next), options.durability);
 			await maybeAudit(filePath, options);
 			return { path: filePath, written: true, revision: currentRevision + 1, stamped: next };
 		}
@@ -610,7 +727,7 @@ export async function writeGuardedWorkflowEnvelopeAtomic(
 					.join("; ")}`,
 			);
 		}
-		await atomicWrite(filePath, jsonText(next));
+		await atomicWrite(filePath, jsonText(next), options.durability);
 		await maybeAudit(filePath, options);
 		return { path: filePath, written: true, revision: currentRevision + 1, stamped: next };
 	};
@@ -622,8 +739,8 @@ export async function writeJsonAtomic(
 	value: unknown,
 	options?: StateWriterOptions,
 ): Promise<string> {
-	const filePath = resolveGjcTarget(targetPath, cwdForOptions(options));
-	await atomicWrite(filePath, jsonText(withWorkflowReceipt(value, buildReceipt(options))));
+	const filePath = await resolveSafeGjcTarget(targetPath, options);
+	await atomicWrite(filePath, jsonText(withWorkflowReceipt(value, buildReceipt(options))), options?.durability);
 	await maybeAudit(filePath, options);
 	return filePath;
 }
@@ -672,7 +789,7 @@ async function recordInvalidWorkflowTransition(args: {
 			to_phase: toPhase,
 			forced: false,
 			paths: [filePath],
-		});
+		}, options);
 	} catch {
 		// Audit logging is best-effort diagnostics; never fail a sanctioned write because the
 		// audit append failed (e.g. cwd is not a writable project root).
@@ -684,7 +801,7 @@ export async function writeWorkflowEnvelopeAtomic(
 	value: unknown,
 	options?: StateWriterOptions,
 ): Promise<string> {
-	const filePath = resolveGjcTarget(targetPath, cwdForOptions(options));
+	const filePath = await resolveSafeGjcTarget(targetPath, options);
 	const write = async (): Promise<string> => {
 		const withReceipt = withWorkflowReceipt(value, buildReceipt(options));
 		const stamped = stampWorkflowEnvelopeChecksum(withReceipt, filePath);
@@ -740,7 +857,7 @@ export async function writeWorkflowEnvelopeAtomic(
 				}
 			}
 		}
-		await atomicWrite(filePath, jsonText(stamped));
+		await atomicWrite(filePath, jsonText(stamped), options?.durability);
 		await maybeAudit(filePath, options);
 		return filePath;
 	};
@@ -753,8 +870,8 @@ export async function writeWorkflowEnvelopeAtomic(
 }
 
 export async function writeTextAtomic(targetPath: string, text: string, options?: StateWriterOptions): Promise<string> {
-	const filePath = resolveGjcTarget(targetPath, cwdForOptions(options));
-	await atomicWrite(filePath, text);
+	const filePath = await resolveSafeGjcTarget(targetPath, options);
+	await atomicWrite(filePath, text, options?.durability);
 	await maybeAudit(filePath, options);
 	return filePath;
 }
@@ -776,7 +893,7 @@ export async function withWorkflowStateLock<T>(
 	fn: () => Promise<T>,
 	options?: StateWriterOptions,
 ): Promise<T> {
-	const filePath = resolveGjcTarget(targetPath, cwdForOptions(options));
+	const filePath = await resolveSafeGjcTarget(targetPath, options);
 	return lockResolvedWorkflowTarget(filePath, fn, options?.lock);
 }
 
@@ -796,13 +913,13 @@ export async function updateJsonAtomic<T = unknown>(
 	mutator: (current: T | undefined) => T | Promise<T>,
 	options?: StateWriterOptions,
 ): Promise<string> {
-	const filePath = resolveGjcTarget(targetPath, cwdForOptions(options));
+	const filePath = await resolveSafeGjcTarget(targetPath, options);
 	return lockResolvedWorkflowTarget(
 		filePath,
 		async () => {
 			const current = (await readJsonIfPresent(filePath)) as T | undefined;
 			const next = await mutator(current);
-			await atomicWrite(filePath, jsonText(withWorkflowReceipt(next, buildReceipt(options))));
+			await atomicWrite(filePath, jsonText(withWorkflowReceipt(next, buildReceipt(options))), options?.durability);
 			await maybeAudit(filePath, options);
 			return filePath;
 		},
@@ -811,9 +928,10 @@ export async function updateJsonAtomic<T = unknown>(
 }
 
 export async function appendJsonl(targetPath: string, entry: unknown, options?: StateWriterOptions): Promise<string> {
-	const filePath = resolveGjcTarget(targetPath, cwdForOptions(options));
+	const filePath = await resolveSafeGjcTarget(targetPath, options);
 	await fs.mkdir(path.dirname(filePath), { recursive: true });
 	await fs.appendFile(filePath, `${JSON.stringify(entry)}\n`, "utf-8");
+	if (options?.durability === "ctf") await syncAppendedFile(filePath);
 	await maybeAudit(filePath, options);
 	return filePath;
 }
@@ -907,7 +1025,7 @@ export async function appendJsonlIdempotent(
 	if (!options.key && !options.equals) {
 		throw new Error("appendJsonlIdempotent requires a `key` or `equals` option to detect duplicates");
 	}
-	const filePath = resolveGjcTarget(targetPath, cwdForOptions(options));
+	const filePath = await resolveSafeGjcTarget(targetPath, options);
 	return lockResolvedWorkflowTarget(
 		filePath,
 		async () => {
@@ -917,6 +1035,7 @@ export async function appendJsonlIdempotent(
 				return { path: filePath, appended: false, duplicate };
 			}
 			await fs.appendFile(filePath, `${JSON.stringify(entry)}\n`, "utf-8");
+			if (options.durability === "ctf") await syncAppendedFile(filePath);
 			await maybeAudit(filePath, options);
 			return { path: filePath, appended: true };
 		},
@@ -925,9 +1044,10 @@ export async function appendJsonlIdempotent(
 }
 
 export async function appendText(targetPath: string, text: string, options?: StateWriterOptions): Promise<string> {
-	const filePath = resolveGjcTarget(targetPath, cwdForOptions(options));
+	const filePath = await resolveSafeGjcTarget(targetPath, options);
 	await fs.mkdir(path.dirname(filePath), { recursive: true });
 	await fs.appendFile(filePath, text, "utf-8");
+	if (options?.durability === "ctf") await syncAppendedFile(filePath);
 	await maybeAudit(filePath, options);
 	return filePath;
 }
@@ -937,18 +1057,20 @@ export async function createJsonNoClobber(
 	value: unknown,
 	options?: StateWriterOptions,
 ): Promise<string> {
-	const filePath = resolveGjcTarget(targetPath, cwdForOptions(options));
+	const filePath = await resolveSafeGjcTarget(targetPath, options);
 	await fs.mkdir(path.dirname(filePath), { recursive: true });
 	let handle: fs.FileHandle | undefined;
 	try {
 		handle = await fs.open(filePath, "wx");
 		await handle.writeFile(jsonText(withWorkflowReceipt(value, buildReceipt(options))), "utf-8");
+		if (options?.durability === "ctf") await handle.sync();
 	} catch (error) {
 		if (isErrno(error, "EEXIST")) throw new AlreadyExistsError(filePath);
 		throw error;
 	} finally {
 		await handle?.close();
 	}
+	if (options?.durability === "ctf") await syncDirectoryChain(path.dirname(filePath));
 	await maybeAudit(filePath, options);
 	return filePath;
 }
@@ -959,18 +1081,18 @@ export async function deleteIfOwned(
 ): Promise<DeleteResult> {
 	const options = typeof predicateOrOptions === "function" ? undefined : predicateOrOptions;
 	const predicate = typeof predicateOrOptions === "function" ? predicateOrOptions : predicateOrOptions?.predicate;
-	const filePath = resolveGjcTarget(targetPath, cwdForOptions(options));
+	const filePath = await resolveSafeGjcTarget(targetPath, options);
 	const current = await readJsonIfPresent(filePath);
 	if (current === undefined) return { path: filePath, deleted: false };
 	if (predicate && !(await predicate(current))) return { path: filePath, deleted: false };
-	const deleted = await atomicRemove(filePath);
+	const deleted = await atomicRemove(filePath, options?.durability);
 	if (deleted) await maybeAudit(filePath, options);
 	return { path: filePath, deleted };
 }
 
 export async function removeFileAudited(targetPath: string, options?: StateWriterOptions): Promise<DeleteResult> {
-	const filePath = resolveGjcTarget(targetPath, cwdForOptions(options));
-	const deleted = await atomicRemove(filePath);
+	const filePath = await resolveSafeGjcTarget(targetPath, options);
+	const deleted = await atomicRemove(filePath, options?.durability);
 	if (deleted) await maybeAudit(filePath, options);
 	return { path: filePath, deleted };
 }
@@ -989,11 +1111,13 @@ export async function writeActiveEntry(
 	options?: StateWriterOptions,
 ): Promise<string> {
 	const filePath = activeEntryPath(path.resolve(cwd), sessionScope, skill);
+	const activeOptions: StateWriterOptions = options ? { ...options, cwd: options.cwd ?? path.resolve(cwd) } : { cwd: path.resolve(cwd) };
+	await assertSafeGjcTarget(filePath, activeOptions);
 	await writeGuardedResolvedJsonAtomic(
 		filePath,
 		{ ...entry, skill },
 		{
-			...options,
+			...activeOptions,
 			policy: "cache",
 			sourceRevision:
 				persistedSourceRevision(entry) || persistedSourceRevision(await readJsonIfPresent(filePath)) + 1,
@@ -1010,6 +1134,8 @@ export async function removeActiveEntry(
 	options?: StateWriterOptions,
 ): Promise<DeleteResult> {
 	const filePath = activeEntryPath(path.resolve(cwd), sessionScope, skill);
+	const safeOptions: StateWriterOptions = options ? { ...options, cwd: options.cwd ?? path.resolve(cwd) } : { cwd: path.resolve(cwd) };
+	await assertSafeGjcTarget(filePath, safeOptions);
 	return lockResolvedWorkflowTarget(
 		filePath,
 		async () => {
@@ -1022,7 +1148,7 @@ export async function removeActiveEntry(
 			) {
 				return { path: filePath, deleted: false };
 			}
-			const deleted = await atomicRemove(filePath);
+			const deleted = await atomicRemove(filePath, options?.durability);
 			if (deleted) await maybeAudit(filePath, options);
 			if (deleted) invalidateActiveStateCacheForScope(cwd, sessionScope);
 			return { path: filePath, deleted };
@@ -1062,9 +1188,12 @@ export async function rebuildActiveSnapshot(
 ): Promise<string> {
 	const resolvedCwd = path.resolve(cwd);
 	const snapshotPath = activeSnapshotPath(resolvedCwd, sessionScope);
+	const activeOptions: StateWriterOptions = options ? { ...options, cwd: options.cwd ?? resolvedCwd } : { cwd: resolvedCwd };
+	await assertSafeGjcTarget(snapshotPath, activeOptions);
 	const entries = await readActiveEntries(resolvedCwd, sessionScope);
 	await writeGuardedResolvedJsonAtomic(snapshotPath, buildActiveSnapshot(entries), {
 		...options,
+		cwd: options?.cwd ?? resolvedCwd,
 		policy: "cache",
 		sourceRevision: Math.max(
 			persistedSourceRevision(await readJsonIfPresent(snapshotPath)) + 1,
@@ -1153,10 +1282,9 @@ export async function hardPrune(
 	selector: GenericHardPruneSelector,
 	options?: StateWriterOptions,
 ): Promise<string[]> {
-	const cwd = cwdForOptions(options);
 	const removed: string[] = [];
 	for (const target of targets) {
-		const filePath = resolveGjcTarget(target.path, cwd);
+		const filePath = await resolveSafeGjcTarget(target.path, options);
 		let stat: Stats;
 		try {
 			stat = await fs.stat(filePath);
@@ -1171,23 +1299,27 @@ export async function hardPrune(
 			readJson: async () => JSON.parse(await fs.readFile(filePath, "utf-8")),
 		});
 		if (!shouldRemove) continue;
-		const deleted = await atomicRemove(filePath);
+		const deleted = await atomicRemove(filePath, options?.durability);
 		if (deleted) removed.push(filePath);
 	}
 	if (options?.audit && removed.length > 0) {
 		const audit = options.audit;
-		await appendAuditEntry(path.resolve(audit.cwd ?? options.cwd ?? process.cwd()), audit.sessionId ?? "", {
-			ts: new Date().toISOString(),
-			skill: audit.skill,
-			category: audit.category,
-			verb: audit.verb,
-			owner: audit.owner,
-			mutation_id: audit.mutationId ?? randomUUID(),
-			from_phase: audit.fromPhase,
-			to_phase: audit.toPhase,
-			forced: audit.forced ?? false,
-			paths: removed,
-		});
+		const auditCwd = path.resolve(audit.cwd ?? options.cwd ?? process.cwd());
+		const auditPath = path.resolve(layoutAuditPath(auditCwd, audit.sessionId ?? ""));
+		if (!options.root || pathWithinRoot(path.resolve(options.root), auditPath)) {
+			await appendAuditEntry(auditCwd, audit.sessionId ?? "", {
+				ts: new Date().toISOString(),
+				skill: audit.skill,
+				category: audit.category,
+				verb: audit.verb,
+				owner: audit.owner,
+				mutation_id: audit.mutationId ?? randomUUID(),
+				from_phase: audit.fromPhase,
+				to_phase: audit.toPhase,
+				forced: audit.forced ?? false,
+				paths: removed,
+			}, options);
+		}
 	}
 	return removed;
 }
@@ -1202,8 +1334,8 @@ export async function forceOverwrite(
 		audit: options?.audit ?? { category: "force", verb: "force-overwrite", owner: "gjc-state-cli", forced: true },
 	};
 	if (options?.raw === true) {
-		const filePath = resolveGjcTarget(targetPath, cwdForOptions(options));
-		await atomicWrite(filePath, jsonText(rawValue));
+		const filePath = await resolveSafeGjcTarget(targetPath, options);
+		await atomicWrite(filePath, jsonText(rawValue), auditOptions.durability);
 		await maybeAudit(filePath, auditOptions);
 		return filePath;
 	}
@@ -1222,6 +1354,7 @@ export async function appendAuditEntry(
 	cwd: string,
 	sessionIdOrEntry: string | AuditEntry,
 	maybeEntry?: AuditEntry,
+	options?: StateWriterOptions,
 ): Promise<string> {
 	const sessionId =
 		typeof sessionIdOrEntry === "string"
@@ -1230,9 +1363,11 @@ export async function appendAuditEntry(
 	if (!sessionId) throw new Error("a non-empty GJC session id is required (appendAuditEntry)");
 	const entry = typeof sessionIdOrEntry === "string" ? maybeEntry : sessionIdOrEntry;
 	if (!entry) throw new Error("audit entry is required");
-	const filePath = resolveGjcTarget(layoutAuditPath(cwd, sessionId), cwd);
+	const writerOptions: StateWriterOptions = options ? { ...options, cwd } : { cwd };
+	const filePath = await resolveSafeGjcTarget(layoutAuditPath(cwd, sessionId), writerOptions);
 	await fs.mkdir(path.dirname(filePath), { recursive: true });
 	await fs.appendFile(filePath, `${JSON.stringify(entry)}\n`, "utf-8");
+	if (writerOptions.durability === "ctf") await syncAppendedFile(filePath);
 	return filePath;
 }
 

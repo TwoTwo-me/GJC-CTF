@@ -1,0 +1,88 @@
+{
+  "schemaVersion": "gjc-ctf-operational-receipt-1",
+  "generatedAt": "2026-08-08T06:41:31Z",
+  "hardStop": "2026-08-09T00:00:00.000Z",
+  "sourceArchiveCommit": "3379d4a7b36680764a34e7dc817cc3c94c244764",
+  "benchmarkStatus": "unavailable",
+  "scored": false,
+  "verification": [
+    {
+      "command": "bun test packages/coding-agent/test/ctf benchmarks/gjc-ctf packages/coding-agent/test/release-build-args.test.ts",
+      "status": "passed",
+      "tests": 261,
+      "assertions": 1028,
+      "failures": 0
+    },
+    {
+      "command": "bun run build",
+      "status": "passed",
+      "outputs": ["packages/coding-agent/dist/gjc", "packages/coding-agent/dist/gjc-ctf"]
+    },
+    {
+      "command": "packages/coding-agent/dist/gjc-ctf --help && packages/coding-agent/dist/gjc-ctf --version",
+      "status": "passed",
+      "version": "0.12.15"
+    },
+    {
+      "command": "compiled gjc-ctf init/status in an isolated temporary workspace",
+      "status": "passed",
+      "canonicalStatus": "available",
+      "manifestRevision": 1
+    },
+    {
+      "command": "bun --cwd=packages/coding-agent run prepack",
+      "status": "passed"
+    },
+    {
+      "command": "bun --cwd=packages/coding-agent run check:types",
+      "status": "failed-outside-ctf-scope",
+      "ctfDiagnostics": 0,
+      "remainingDiagnosticsScope": "pre-existing non-CTF browser, LSP, widget, and docs-rs tests"
+    },
+    {
+      "command": "check-visible-definitions + verify-g002-gates + strict rebrand inventory + default definitions + CLI smoke",
+      "status": "passed"
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "packages/coding-agent/dist/gjc",
+      "bytes": 258619520,
+      "sha256": "a5127b27d895e7cee283e4c8af38ac2add68c4b3d05a51d79537000d5de6752a"
+    },
+    {
+      "path": "packages/coding-agent/dist/gjc-ctf",
+      "bytes": 230582400,
+      "sha256": "70f059cd71b0bc1f358ed33a2187b030227a33ed9403c521d09852b41edc2512"
+    },
+    {
+      "path": "packages/coding-agent/src/ctf/dashboard/embedded-client.generated.txt",
+      "bytes": 6849,
+      "sha256": "f5e1f53a39cd9a0ad19e156e5747949a1e6759dba7b1f08696eae0bb4c2b91dc"
+    }
+  ],
+  "regressionsResolved": [
+    "Compiled dashboard assets now use relative URLs so Bun can embed them.",
+    "The statically imported CTF skill is no longer listed as a second Bun compile entrypoint, preventing compiled identity corruption.",
+    "Release and validation scripts resolve the relocated non-default CTF skill path.",
+    "Evaluation oracle nonces use a CtfId-safe prefix and passed repeated stress verification.",
+    "Materialized corpus bytes and provenance are bound to immutable registered authority before solver invocation.",
+    "Tier progression is bound to controller-owned authority rather than caller-supplied alternate universes.",
+    "Cleanup, secret revocation, and deadline cancellation require explicit owner acknowledgment before success.",
+    "Reviewed bootstrap manifests are deeply frozen and revalidated at use time.",
+    "Trusted oracle result schema versions are bound to registry entry output schema versions.",
+    "Production preflight evidence is bound to the registered descriptor and manifest; fixture evidence remains non-scoreable.",
+    "Standalone CTF binaries are built, smoke-tested, and wired into every release target.",
+    "Dashboard archive generation is deterministic across prepack and full release builds."
+  ],
+  "limitations": [
+    "No archive flag, official solution, hidden metadata, or external challenge endpoint was used.",
+    "Tier 2 remains locked because independent active-tier benchmark verification is unavailable.",
+    "Local checker passes remain diagnostic and are not independently verified benchmark solves.",
+    "Package-wide type checking still reports unrelated pre-existing non-CTF diagnostics; no CTF diagnostics remained in the captured filtered run."
+  ]
+}

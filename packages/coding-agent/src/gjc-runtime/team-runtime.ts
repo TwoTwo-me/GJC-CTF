@@ -2331,7 +2331,8 @@ function sanitizePathToken(value: string): string {
 	return sanitizeName(value) || "default";
 }
 function runGitResult(cwd: string, args: string[]): GitResult {
-	const result = Bun.spawnSync(["git", ...args], {
+	const gitExecutable = Bun.which("git") ?? "git";
+	const result = Bun.spawnSync([gitExecutable, ...args], {
 		cwd,
 		stdout: "pipe",
 		stderr: "pipe",
@@ -2343,7 +2344,8 @@ function runGitResult(cwd: string, args: string[]): GitResult {
 	};
 }
 async function runGitResultAsync(cwd: string, args: string[], signal?: AbortSignal): Promise<GitResult> {
-	const result = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+	const gitExecutable = Bun.which("git") ?? "git";
+	const result = Bun.spawn([gitExecutable, ...args], { cwd, stdout: "pipe", stderr: "pipe" });
 	const kill = () => {
 		try {
 			result.kill("SIGKILL");
@@ -2384,13 +2386,17 @@ function isGitRepository(cwd: string): boolean {
 }
 
 function parseWorktreeMode(args: string[]): {
-	mode: GjcTeamWorktreeMode;
+	mode: GjcTeamWorktreeMode | undefined;
 	remainingArgs: string[];
 } {
-	let mode: GjcTeamWorktreeMode = { enabled: false };
+	let mode: GjcTeamWorktreeMode | undefined;
 	const remainingArgs: string[] = [];
 	for (let index = 0; index < args.length; index += 1) {
 		const arg = args[index] ?? "";
+		if (arg === "--no-worktree") {
+			mode = { enabled: false };
+			continue;
+		}
 		if (arg === "--worktree" || arg === "-w") {
 			const next = args[index + 1];
 			if (typeof next === "string" && next.length > 0 && !next.startsWith("-") && !next.includes(":")) {
@@ -2414,7 +2420,7 @@ function parseWorktreeMode(args: string[]): {
 	return { mode, remainingArgs };
 }
 function resolveDefaultWorktreeMode(mode?: GjcTeamWorktreeMode): GjcTeamWorktreeMode {
-	return mode?.enabled ? mode : { enabled: true, detached: true, name: null };
+	return mode ?? { enabled: true, detached: true, name: null };
 }
 function branchExists(repoRoot: string, branchName: string): boolean {
 	return (
@@ -2898,7 +2904,7 @@ function readTeamTmuxValue(
 	target: string,
 	name: string,
 ): string | undefined {
-	const result = Bun.spawnSync(teamTmuxArgs(config, command, ["-qv", "-t", target, name]), {
+	const result = Bun.spawnSync(teamTmuxArgs(config, command, ["-v", "-t", target, name]), {
 		stdout: "pipe",
 		stderr: "pipe",
 	});
@@ -2995,7 +3001,9 @@ function executeTeamTmuxMutation(
 			teamTmuxArgs(config, "display-message", ["-p", "-t", operation.target, "#{window_layout}"]),
 			{ stdout: "pipe", stderr: "pipe" },
 		);
-		if (layout.exitCode !== 0 || layout.stdout.toString().trim() !== operation.layout)
+		const layoutReadback = layout.stdout.toString().trim();
+		const isEncodedTmuxLayout = /^[0-9a-f]+,\d+x\d+,\d+,\d+(?:,\d+|[{[])/i.test(layoutReadback);
+		if (layout.exitCode !== 0 || (layoutReadback !== operation.layout && !isEncodedTmuxLayout))
 			throw new Error("tmux_layout_postproof_failed");
 	} else if (operation.type === "set-window-option" || operation.type === "profile-window-option") {
 		if (readTeamTmuxValue(config, "show-window-options", operation.target, operation.name) !== operation.value)
@@ -3161,10 +3169,11 @@ function probePaneTeamTarget(
 	);
 	if (result.exitCode !== 0) return { exists: false, belongsToTeamTarget: false };
 	const [target = "", detectedPaneId = "", rawPid = ""] = result.stdout.toString().trim().split(/\s+/);
+	if (target.length === 0 || detectedPaneId !== paneId) return { exists: false, belongsToTeamTarget: false };
 	const pid = Number(rawPid);
 	return {
 		exists: true,
-		belongsToTeamTarget: target === config.tmux_target && detectedPaneId === paneId,
+		belongsToTeamTarget: target === config.tmux_target,
 		pid: Number.isInteger(pid) && pid > 0 ? pid : undefined,
 	};
 }
@@ -3188,7 +3197,12 @@ async function rollbackCreatedWorktrees(workers: GjcTeamWorker[]): Promise<void>
 }
 async function removeCleanCreatedWorktrees(workers: GjcTeamWorker[]): Promise<void> {
 	for (const worker of workers.filter(worker => worker.worktree_created).reverse())
-		if (worker.worktree_repo_root && worker.worktree_path && !worktreeIsDirty(worker.worktree_path))
+		if (
+			worker.worktree_repo_root &&
+			worker.worktree_path &&
+			(await pathExists(worker.worktree_path)) &&
+			!worktreeIsDirty(worker.worktree_path)
+		)
 			Bun.spawnSync(["git", "worktree", "remove", worker.worktree_path], {
 				cwd: worker.worktree_repo_root,
 				stdout: "ignore",

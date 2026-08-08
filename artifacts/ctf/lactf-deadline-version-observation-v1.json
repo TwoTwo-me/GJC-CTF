@@ -1,0 +1,82 @@
+{
+  "schemaVersion": "gjc-ctf-deadline-version-observation-1",
+  "generatedAt": "2026-08-08T05:02:55.069Z",
+  "hardStop": "2026-08-09T00:00:00.000Z",
+  "sourceCommit": "3379d4a7b36680764a34e7dc817cc3c94c244764",
+  "versions": [
+    {
+      "versionId": "campaign-expanded-v2",
+      "scope": "six-challenge-campaign",
+      "evidenceDigest": "3a834bd5cbb0a988e8c948ea454255d22ec3d3851b8617a64f6c1d920376e557",
+      "effectiveSkillVersion": "unknown",
+      "effectiveSkillDigest": "unknown",
+      "routeRegistryDigest": "unknown",
+      "eligibleChallengeCount": 6,
+      "reviewedAnalyzerCount": 1,
+      "candidateOnlyCount": 4,
+      "localCheckerPassCount": 0,
+      "independentlyVerifiedSolveCount": 0,
+      "failureCount": 2,
+      "unknownMetrics": [
+        "solveRate",
+        "passAt1",
+        "passAt3",
+        "firstValidLatencyMs",
+        "p50RuntimeMs",
+        "p95RuntimeMs",
+        "tokens",
+        "toolCalls",
+        "cost",
+        "confidence",
+        "holdout"
+      ]
+    },
+    {
+      "versionId": "tier1-analyzers-v1.1.0",
+      "scope": "tier1-analyzer-smoke",
+      "evidenceDigest": "ca3ec07f815792987478223f6295becd1ecea8ece7017827097d0b0b56dc59b4",
+      "effectiveSkillVersion": "1.1.0",
+      "effectiveSkillDigest": "50114a8a653aa797b1cb0e81a40ecf25312052d952b023b57e1c48250f2f64ab",
+      "routeRegistryDigest": "e95dd3b8d5e919ac40451392c7c8ee0006d78eb7d0b6800313741267229c5612",
+      "eligibleChallengeCount": 3,
+      "reviewedAnalyzerCount": 3,
+      "candidateOnlyCount": 3,
+      "localCheckerPassCount": 3,
+      "independentlyVerifiedSolveCount": 0,
+      "failureCount": 0,
+      "unknownMetrics": [
+        "solveRate",
+        "passAt1",
+        "passAt3",
+        "firstValidLatencyMs",
+        "p50RuntimeMs",
+        "p95RuntimeMs",
+        "tokens",
+        "toolCalls",
+        "cost",
+        "confidence",
+        "holdout"
+      ]
+    }
+  ],
+  "comparison": {
+    "benchmarkStatus": "unavailable",
+    "comparable": false,
+    "reason": "The baseline covers six model-driven campaign challenges while the current diagnostic covers three active-tier reviewed analyzers; permission, calibration, signed runtime authority, and a pre-authorized independent oracle are unavailable.",
+    "diagnosticDeltas": {
+      "reviewedAnalyzerCount": 2,
+      "candidateOnlyCount": -1,
+      "localCheckerPassCount": 3,
+      "independentlyVerifiedSolveCount": 0,
+      "failureCount": -2
+    },
+    "regressions": []
+  },
+  "limitations": [
+    "Archive flags and official solutions were excluded from solver and oracle evidence.",
+    "The three local checker passes use an ephemeral diagnostic authority and are not benchmark solves.",
+    "Tier 2 remains locked because independent active-tier benchmark verification is unavailable.",
+    "Different scopes make solve-rate and failure-count deltas non-comparable."
+  ],
+  "observationDigest": "324f9efd0f9237b9fdcfd8d32c9d744929a878bceb48f4ffe575e4222c03f147"
+}

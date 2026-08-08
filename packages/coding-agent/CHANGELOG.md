@@ -1,6 +1,27 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+- Added the additive `gjc-ctf` harness with challenge-scoped journals/fences/checkpoints, signed graph/oracle authority, bounded parallel candidate scheduling, pinned LA CTF corpus acquisition, deterministic non-scored five-repeat fixtures, and a durable signed-report skill optimizer.
+- Added a source-bundled, category-based CTF tool bootstrap with dry-run/apply audit output, exact package-manager argv, post-install verification, and fail-closed rejection of challenge-controlled manifests.
+- Added operator guidance for corpus provenance, parallel scheduling, benchmark lineage, optimizer promotion/rollback, recovery, safe tool installation, and the external authorities still required for scored solves.
+- Added a tool-free production GJC AgentSession solver adapter and digest-sealed resumable local campaign controller with bounded parallel attempts, provenance-bound visible inputs, durable candidate/unknown/failure retention, cancellation, and a fixed `2026-08-09T00:00:00Z` hard stop.
+- Added a reviewed, bounded Z3 regex-grid analyzer and ordered analyzer seam for local candidate campaigns; unsupported inputs fall through to the isolated AgentSession, while derived bitmaps remain unverified candidates.
+- Added a reviewed, bounded clean-room analyzer for LA CTF `not-so-lazy-trigrams`, with exact visible-file and transform-grammar checks, deterministic three-phase substitution search, and full forward-transform validation; its output remains an unverified candidate.
+- Hardened CTF releases with a packaged immutable dashboard archive, compiled-binary dashboard smoke coverage, complete platform asset checks, source-pinned Windows bootstrap discovery, anchored split-key oracle authority, immutable corpus blob materialization, bounded authority cancellation, machine-readable evidence revocation, and identity-bound version statistics.
+- Added exact route-bound, bounded local process/browser adapter capabilities for dynamic CTF attempts and a read-only `gjc-ctf stats inspect` command for active candidate-free version observations.
+- `gjc-ctf init` now installs and binds its immutable competition-local CTF skill artifact automatically, using descriptor-relative fail-closed native publication instead of a global workflow skill or pathname fallback.
+- CTF bootstrap now binds probes, installers, and elevation to revalidated canonical executable identities from trusted absolute roots, and can seal exact route/tool readiness as an unscored `SolverCapabilityClosureV1`.
+- Local CTF evaluation can now emit a redacted, fresh-instance-bound V2 oracle receipt under external split-key trust anchors and durably attach it to the live run fence as verified evidence pending separate score authority.
+- Replaced optimizer-local aggregate promotion with a digest-sealed blinded round: independently signed training selection, one signed holdout look, explicit zero-look unavailable closure, module-confined promotion authority, replay-safe finalization, and redacted bounded failure continuation.
+- Removed the production-exported raw version-statistics aggregation seam; version statistics and comparisons now enter only through the complete evaluator-authorized request path.
+- Hardened dynamic CTF evaluation with mandatory terminate-and-quiesce ownership for adapters, secret injection, analyzers, and agent sessions; retained copied public capabilities; and bound resumable candidates to exact producer and route digests.
+- Added route-bound binary-safe pwn diagnostics: canonical base64 process I/O, a bounded non-executing ELF64/x86-64 inspector with capped sensitive-string-redacted output, and an opt-in rootless local Podman provider with exact materialization digests, a pinned no-pull image, fixed isolation/resource controls, serialized restart and container-identity cleanup, and fail-closed image absence.
+
+### Fixed
+- Rootless Podman CTF sessions now preserve the canonical non-root user home required to reach the verified local image store, validate that home before use, and give bounded control-plane probes enough time to start instead of making the production provider permanently unavailable.
+- Reviewed CTF solver routes now pin the provider-qualified `openai-codex/gpt-5.6-sol` identity, preventing a fuzzy `gpt-5` selector from silently choosing a different provider under the same route digest.
+- The Endians analyzer now accepts the oracle's full 4096-byte fresh-fixture secret boundary while still rejecting oversized decoded candidates and encoded inputs.
 
 ### Added
 

@@ -543,6 +543,10 @@ export interface AgentSessionConfig {
 	promptTemplates?: PromptTemplate[];
 	/** File-based slash commands for expansion */
 	slashCommands?: FileSlashCommand[];
+	/** Disable implicit @filepath expansion; prompts remain literal user input. */
+	disableFileMentions?: boolean;
+	/** Disable process-global worker and roster background integration. */
+	disableBackgroundIntegration?: boolean;
 	/** Extension runner (created in main.ts with wrapped tools) */
 	extensionRunner?: ExtensionRunner;
 	/** Override first-party worker integration dispatch for embedded hosts and deterministic lifecycle tests. */
@@ -1963,6 +1967,8 @@ export class AgentSession {
 	#agentRegistry: AgentRegistry | undefined;
 	#lastDeliveredIrcRosterSignature: string | null = null;
 	#ircRosterEpoch = 0;
+	#disableFileMentions = false;
+	#disableBackgroundIntegration = false;
 	#ircRosterClaim: IrcRosterClaim | null = null;
 	#providerSessionId: string | undefined;
 	#providerCacheSessionId: string | undefined;
@@ -2578,41 +2584,51 @@ export class AgentSession {
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
 		this.#workerIntegrationScheduler = new WorkerIntegrationRequestScheduler(
-			config.workerIntegrationRequest ??
-				(async signal => {
-					await requestGjcWorkerIntegrationAttempt(this.sessionManager.getCwd(), process.env, { signal }).catch(
-						error => {
-							logger.warn("GJC team worker integration request failed", { error: String(error) });
-						},
-					);
-				}),
+			config.disableBackgroundIntegration === true
+				? async () => {}
+				: (config.workerIntegrationRequest ??
+						(async signal => {
+							await requestGjcWorkerIntegrationAttempt(this.sessionManager.getCwd(), process.env, {
+								signal,
+							}).catch(error => {
+								logger.warn("GJC team worker integration request failed", { error: String(error) });
+							});
+						})),
 			config.workerIntegrationTimeoutMs,
 		);
 		// One publisher per worker process: subagent sessions share this process and its
 		// team env, so letting each create a reporter would run N timers writing the same
 		// record. The top-level session owns the pane's liveness.
 		this.#teamWorkerHeartbeat =
-			config.teamWorkerHeartbeatReporter ??
-			((config.taskDepth ?? 0) === 0
-				? GjcTeamWorkerHeartbeatReporter.forProcess(() => this.sessionManager.getCwd())
-				: undefined);
+			config.disableBackgroundIntegration === true
+				? undefined
+				: (config.teamWorkerHeartbeatReporter ??
+					((config.taskDepth ?? 0) === 0
+						? GjcTeamWorkerHeartbeatReporter.forProcess(() => this.sessionManager.getCwd())
+						: undefined));
 		this.notificationSessionController = config.notificationSessionController;
 		this.taskDepth = config.taskDepth ?? 0;
+		this.#disableFileMentions = config.disableFileMentions === true;
+		this.#disableBackgroundIntegration = config.disableBackgroundIntegration === true;
 		// Register this session with the process-wide resource GC (idle/RSS browser-tab eviction
 		// + stale screenshot cleanup). Session-keyed so concurrent sessions share one timer safely.
-		const resourceGcSessionId = this.sessionManager.getSessionId();
-		if (resourceGcSessionId) {
-			this.#unregisterResourceGc = registerResourceGcSession({
-				sessionId: resourceGcSessionId,
-				settings: this.settings,
-				cwd: () => this.sessionManager.getCwd(),
+		if (!config.disableBackgroundIntegration) {
+			const resourceGcSessionId = this.sessionManager.getSessionId();
+			if (resourceGcSessionId) {
+				this.#unregisterResourceGc = registerResourceGcSession({
+					sessionId: resourceGcSessionId,
+					settings: this.settings,
+					cwd: () => this.sessionManager.getCwd(),
+				});
+			}
+		}
+		if (!this.#disableBackgroundIntegration) {
+			this.#unregisterRuntimeStateFinalizer = registerCoordinatorRuntimeStateFinalizer({
+				sessionId: this.sessionId,
+				cwd: this.sessionManager.getCwd(),
+				sessionFile: this.sessionManager.getSessionFile(),
 			});
 		}
-		this.#unregisterRuntimeStateFinalizer = registerCoordinatorRuntimeStateFinalizer({
-			sessionId: this.sessionId,
-			cwd: this.sessionManager.getCwd(),
-			sessionFile: this.sessionManager.getSessionFile(),
-		});
 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.
 		this.#evalKernelOwnerId = config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`;
 		this.#recoveryHydrationContext = config.recoveryHydrationContext;
@@ -6120,14 +6136,15 @@ export class AgentSession {
 				MCPManager.setInstance(undefined);
 			}
 		}
-		await shutdownAllLspClients();
+		if (!this.#disableBackgroundIntegration) await shutdownAllLspClients();
 		// F13: release only THIS session's browser tabs on dispose (kill:false → remote
 		// browsers disconnect, headless close gracefully). Scoped by the session id the
 		// browser tool tagged tabs with, so other live sessions' tabs are untouched.
 		// No-op when this session opened no tabs. Failure is logged, not thrown.
 		this.#unregisterResourceGc?.();
 		this.#unregisterResourceGc = undefined;
-		if (ownerTerminalContextFromEnvironment() === null) this.#unregisterRuntimeStateFinalizer?.();
+		if (!this.#disableBackgroundIntegration && ownerTerminalContextFromEnvironment() === null)
+			this.#unregisterRuntimeStateFinalizer?.();
 		this.#unregisterRuntimeStateFinalizer = undefined;
 		await releaseTabsForOwner(this.sessionManager.getSessionId()).catch((error: unknown) =>
 			logger.warn("session dispose: releaseTabsForOwner failed", { error }),
@@ -8723,32 +8740,35 @@ export class AgentSession {
 			}
 
 			// Auto-read @filepath mentions
-			const fileMentions = extractFileMentions(expandedText);
-			if (fileMentions.length > 0) {
-				const cwd = this.sessionManager.getCwd();
-				// Collect resolved paths already shown (read or mentioned) in the recent
-				// window so a repeat @mention emits a compact note instead of the full body.
-				const RECENT_MENTION_WINDOW = 40;
-				const recentlyShownPaths = new Set<string>();
-				for (const entry of this.sessionManager.getBranch().slice(-RECENT_MENTION_WINDOW)) {
-					if (entry.type !== "message") continue;
-					const msg = entry.message;
-					if (msg.role === "fileMention") {
-						for (const file of msg.files) {
-							if (!file.duplicate && !file.pruned) recentlyShownPaths.add(resolveReadPath(file.path, cwd));
+			if (!this.#disableFileMentions) {
+				const fileMentions = extractFileMentions(expandedText);
+				if (fileMentions.length > 0) {
+					const cwd = this.sessionManager.getCwd();
+					// Collect resolved paths already shown (read or mentioned) in the recent
+					// window so a repeat @mention emits a compact note instead of the full body.
+					const RECENT_MENTION_WINDOW = 40;
+					const recentlyShownPaths = new Set<string>();
+					for (const entry of this.sessionManager.getBranch().slice(-RECENT_MENTION_WINDOW)) {
+						if (entry.type !== "message") continue;
+						const msg = entry.message;
+						if (msg.role === "fileMention") {
+							for (const file of msg.files) {
+								if (!file.duplicate && !file.pruned) recentlyShownPaths.add(resolveReadPath(file.path, cwd));
+							}
+						} else if (msg.role === "toolResult") {
+							const resolved = (msg.details as { resolvedPath?: unknown } | undefined)?.resolvedPath;
+							if (typeof resolved === "string" && resolved)
+								recentlyShownPaths.add(resolveReadPath(resolved, cwd));
 						}
-					} else if (msg.role === "toolResult") {
-						const resolved = (msg.details as { resolvedPath?: unknown } | undefined)?.resolvedPath;
-						if (typeof resolved === "string" && resolved) recentlyShownPaths.add(resolveReadPath(resolved, cwd));
 					}
+					const fileMentionMessages = await generateFileMentionMessages(fileMentions, cwd, {
+						autoResizeImages: this.settings.get("images.autoResize"),
+						useHashLines: resolveFileDisplayMode(this).hashLines,
+						maxInlineBytes: this.settings.get("tools.fileMentionInlineBytes") * 1024,
+						recentlyShownPaths,
+					});
+					messages.push(...fileMentionMessages);
 				}
-				const fileMentionMessages = await generateFileMentionMessages(fileMentions, cwd, {
-					autoResizeImages: this.settings.get("images.autoResize"),
-					useHashLines: resolveFileDisplayMode(this).hashLines,
-					maxInlineBytes: this.settings.get("tools.fileMentionInlineBytes") * 1024,
-					recentlyShownPaths,
-				});
-				messages.push(...fileMentionMessages);
 			}
 
 			const beforeAgentStartSystemPrompt = await this.#buildSystemPromptForAgentStart(expandedText);

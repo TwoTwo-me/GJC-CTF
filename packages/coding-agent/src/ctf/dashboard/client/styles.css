@@ -1,0 +1,38 @@
+:root {
+	font-family: system-ui, sans-serif;
+	color-scheme: dark light;
+}
+
+body {
+	margin: 2rem auto;
+	max-width: 80rem;
+	padding: 0 1rem;
+}
+
+nav {
+	display: flex;
+	gap: 0.5rem;
+	margin-bottom: 1rem;
+}
+
+button {
+	cursor: pointer;
+	padding: 0.35rem 0.7rem;
+}
+
+pre {
+	background: color-mix(in srgb, Canvas 88%, CanvasText);
+	border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+	overflow: auto;
+	padding: 1rem;
+	white-space: pre-wrap;
+}
+
+.projection-integrity_error {
+	color: #b42318;
+}
+
+.projection-lagging,
+.projection-rebuilding {
+	color: #b54708;
+}

@@ -425,6 +425,12 @@ export interface CreateAgentSessionOptions {
 	skipPythonPreflight?: boolean;
 	/** Tool names explicitly requested (enables disabled-by-default tools) */
 	toolNames?: string[];
+	/**
+	 * Closed-world embedding mode. Only caller customTools and explicitly requested
+	 * built-ins may be active; additive SDK tool, extension, protocol, and discovery
+	 * surfaces are disabled.
+	 */
+	strictToolIsolation?: true;
 
 	/** Output schema for structured completion (subagents) */
 	outputSchema?: unknown;
@@ -1095,6 +1101,23 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (options.mcpConfigPath !== undefined && !path.isAbsolute(options.mcpConfigPath)) {
 		throw new Error(MCP_CONFIG_PATH_ABSOLUTE_ERROR);
 	}
+	if (
+		options.strictToolIsolation === true &&
+		(options.agentRegistry !== undefined ||
+			options.agentId !== undefined ||
+			options.agentDisplayName !== undefined ||
+			options.agentRosterLabel !== undefined ||
+			options.parentTaskPrefix !== undefined ||
+			options.taskDepth !== undefined ||
+			options.currentAgentType !== undefined ||
+			options.mcpManager !== undefined ||
+			options.mcpConfigPath !== undefined ||
+			options.extensions?.length ||
+			options.preloadedExtensions !== undefined ||
+			options.localProtocolOptions !== undefined ||
+			options.gjcSubskillToolContext !== undefined)
+	)
+		throw new Error("strict tool isolation rejects agent identity and additive SDK integration surfaces");
 	if (isCanonicalSubSession && options.mcpManager?.isToolsOnly()) {
 		throw new Error(MCP_TOOLS_ONLY_MANAGER_SUBSESSION_ERROR);
 	}
@@ -1125,14 +1148,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let hasSession = false;
 	let hasRegistered = false;
 	let cleanupOwnedMcpManager: (() => Promise<void>) | undefined;
-	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
-	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
+	const agentRegistry =
+		options.strictToolIsolation === true ? undefined : (options.agentRegistry ?? AgentRegistry.global());
+	const resolvedAgentId =
+		options.strictToolIsolation === true ? undefined : (options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID);
 	const resolvedAgentDisplayName = options.agentDisplayName ?? (isCanonicalSubSession ? "sub" : "main");
-	const resolvedAgentRosterLabel = resolveAgentRosterLabel(
-		options.agentRosterLabel,
-		resolvedAgentId,
-		resolvedAgentDisplayName,
-	);
+	const resolvedAgentRosterLabel =
+		resolvedAgentId === undefined
+			? ""
+			: resolveAgentRosterLabel(options.agentRosterLabel, resolvedAgentId, resolvedAgentDisplayName);
 	const evalKernelOwnerId = `agent-session:${Snowflake.next()}`;
 	let disposeLocalProtocolOverride: (() => void) | undefined;
 	let localProtocolOverrideReleased = false;
@@ -1197,19 +1221,26 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			? Promise.resolve(options.workspaceTree)
 			: logger.time("buildWorkspaceTree", () => buildWorkspaceTree(cwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS }));
 		workspaceTreePromise.catch(() => {});
-
-		// Independent discoveries that depend only on cwd/agentDir — kicked off in parallel and awaited
-		// at their respective consumer sites. Their work can overlap with model resolution, secret loading,
-		// session-context build, tool creation, MCP discovery, and extension discovery.
-		const contextFilesResultPromise = options.contextFiles
-			? Promise.resolve({ contextFiles: options.contextFiles, warnings: [] })
-			: logger.time("discoverContextFiles", loadContextFilesResultInternal, { cwd });
+		const contextFilesResultPromise =
+			options.strictToolIsolation === true
+				? Promise.resolve({ contextFiles: [], warnings: [] })
+				: options.contextFiles
+					? Promise.resolve({ contextFiles: options.contextFiles, warnings: [] })
+					: logger.time("discoverContextFiles", loadContextFilesResultInternal, { cwd });
 		contextFilesResultPromise.catch(() => {});
-		const promptTemplatesPromise = options.promptTemplates
-			? Promise.resolve(options.promptTemplates)
-			: logger.time("discoverPromptTemplates", discoverPromptTemplates, cwd, agentDir);
+		const promptTemplatesPromise =
+			options.strictToolIsolation === true
+				? Promise.resolve([])
+				: options.promptTemplates
+					? Promise.resolve(options.promptTemplates)
+					: logger.time("discoverPromptTemplates", discoverPromptTemplates, cwd, agentDir);
 		promptTemplatesPromise.catch(() => {});
-		const slashCommandsPromise = options.slashCommands ? Promise.resolve(options.slashCommands) : Promise.resolve([]);
+		const slashCommandsPromise =
+			options.strictToolIsolation === true
+				? Promise.resolve([])
+				: options.slashCommands
+					? Promise.resolve(options.slashCommands)
+					: Promise.resolve([]);
 		slashCommandsPromise.catch(() => {});
 
 		// Initialize provider preferences from settings
@@ -1611,7 +1642,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				return agent ? agent.serviceTier : initialServiceTier;
 			},
 			isFastForSubagentProvider: provider => session?.isFastForSubagentProvider(provider) ?? false,
-			getAgentId: () => resolvedAgentId,
+			getAgentId: () => resolvedAgentId ?? null,
 			bashAllowedPrefixes: options.bashAllowedPrefixes,
 			bashRestrictionProfile: options.bashRestrictionProfile,
 			goalToolAllowedOps: options.goalToolAllowedOps,
@@ -1694,14 +1725,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getManagedLegacyLocalMigrationSource: () => sessionManager.getManagedLegacyLocalMigrationSource(),
 			getSessionId: () => sessionManager.getSessionId(),
 		};
-		if (!options.parentTaskPrefix) {
+		if (!options.parentTaskPrefix && options.strictToolIsolation !== true) {
 			setActiveSkills(skills);
 			setActiveRules([...rulebookRules, ...alwaysApplyRules]);
 			if (asyncJobManager) AsyncJobManager.setInstance(asyncJobManager);
 		}
-		await initializeLocalRoot(localProtocolOptions);
-		if (options.localProtocolOptions) {
-			disposeLocalProtocolOverride = LocalProtocolHandler.installOverride(options.localProtocolOptions);
+		if (options.strictToolIsolation !== true) {
+			await initializeLocalRoot(localProtocolOptions);
+			if (options.localProtocolOptions) {
+				disposeLocalProtocolOverride = LocalProtocolHandler.installOverride(options.localProtocolOptions);
+			}
 		}
 		toolSession.getArtifactsDir = getArtifactsDir;
 		toolSession.getAuthorizedArtifactsDirs = () => {
@@ -1729,15 +1762,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const pluginMcpToolNames: string[] = [];
 		let deferredExactMcpConfig: { manager: MCPManager; configPath: string } | undefined;
 
-		// Add image tools when the active model or configured image providers can generate images.
-		const imageGenTools = await logger.time("getImageGenTools", () => getImageGenTools(modelRegistry, model));
-		if (imageGenTools.length > 0) {
-			customTools.push(...(imageGenTools as unknown as CustomTool[]));
-		}
-
-		// Add web search tools
-		if (options.toolNames?.includes("web_search")) {
-			customTools.push(...getSearchTools());
+		// Strict isolation is intentionally closed-world: no credential-backed image
+		// or discovery tools may become additive authority.
+		if (options.strictToolIsolation !== true) {
+			const imageGenTools = await logger.time("getImageGenTools", () => getImageGenTools(modelRegistry, model));
+			if (imageGenTools.length > 0) customTools.push(...(imageGenTools as unknown as CustomTool[]));
+			if (options.toolNames?.includes("web_search")) customTools.push(...getSearchTools());
 		}
 
 		const getReservedSubskillToolNames = () => [
@@ -1749,34 +1779,32 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			]),
 		];
 
-		const gjcSubskillToolContext = options.gjcSubskillToolContext;
-		if (gjcSubskillToolContext?.parent.trim() && gjcSubskillToolContext.phase.trim()) {
-			const pluginTools = await loadActiveSubskillTools({
-				cwd: gjcSubskillToolContext.cwd ?? cwd,
-				sessionId: gjcSubskillToolContext.sessionId ?? logicalSessionId,
-				parent: gjcSubskillToolContext.parent,
-				phase: gjcSubskillToolContext.phase,
-				reservedToolNames: getReservedSubskillToolNames(),
-			});
-			if (pluginTools.length > 0) {
-				customTools.push(...pluginTools);
-			}
-		} else {
-			for (const skill of skills) {
-				const phase = await resolveCurrentPhaseForParent({
-					cwd,
-					sessionId: logicalSessionId,
-					parent: skill.name,
-				});
+		if (options.strictToolIsolation !== true) {
+			const gjcSubskillToolContext = options.gjcSubskillToolContext;
+			if (gjcSubskillToolContext?.parent.trim() && gjcSubskillToolContext.phase.trim()) {
 				const pluginTools = await loadActiveSubskillTools({
-					cwd,
-					sessionId: logicalSessionId,
-					parent: skill.name,
-					phase,
+					cwd: gjcSubskillToolContext.cwd ?? cwd,
+					sessionId: gjcSubskillToolContext.sessionId ?? logicalSessionId,
+					parent: gjcSubskillToolContext.parent,
+					phase: gjcSubskillToolContext.phase,
 					reservedToolNames: getReservedSubskillToolNames(),
 				});
-				if (pluginTools.length > 0) {
-					customTools.push(...pluginTools);
+				if (pluginTools.length > 0) customTools.push(...pluginTools);
+			} else {
+				for (const skill of skills) {
+					const phase = await resolveCurrentPhaseForParent({
+						cwd,
+						sessionId: logicalSessionId,
+						parent: skill.name,
+					});
+					const pluginTools = await loadActiveSubskillTools({
+						cwd,
+						sessionId: logicalSessionId,
+						parent: skill.name,
+						phase,
+						reservedToolNames: getReservedSubskillToolNames(),
+					});
+					if (pluginTools.length > 0) customTools.push(...pluginTools);
 				}
 			}
 		}
@@ -1787,37 +1815,41 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const gjcRuntimeStore = new GjcRuntimeSnapshotStore();
 		let gjcProducersComplete = true;
 		let gjcActivationGeneration = 0;
-		try {
-			gjcActivationGeneration = gjcActivationGenerationFor(await currentActivationFingerprint({ cwd }));
-		} catch (error) {
-			// Without a readable activation generation no snapshot can be proven
-			// current, so publish nothing rather than a snapshot consumers cannot
-			// validate against.
-			gjcProducersComplete = false;
-			logger.warn("Failed to derive GJC bundle activation generation", { error });
+		if (options.strictToolIsolation !== true) {
+			try {
+				gjcActivationGeneration = gjcActivationGenerationFor(await currentActivationFingerprint({ cwd }));
+			} catch (error) {
+				// Without a readable activation generation no snapshot can be proven
+				// current, so publish nothing rather than a snapshot consumers cannot
+				// validate against.
+				gjcProducersComplete = false;
+				logger.warn("Failed to derive GJC bundle activation generation", { error });
+			}
 		}
 		const gjcFindings = new GjcRuntimeFindingAccumulator(gjcActivationGeneration);
 
 		// Always-on GJC plugin bundle tools (validated registry surfaces). This is
 		// additive and a no-op when no plugins are installed for the cwd. Surfaces
 		// are hash-verified and collision-checked; declared names are authoritative.
-		try {
-			const pluginToolResult = await loadAlwaysOnPluginTools({
-				cwd,
-				reservedToolNames: [...getReservedSubskillToolNames(), ...customTools.map(tool => tool.name)],
-			});
-			if (pluginToolResult.tools.length > 0) customTools.push(...pluginToolResult.tools);
-			for (const q of pluginToolResult.quarantine) {
-				gjcFindings.add({ identity: q.identity, surfaceId: q.surfaceId, code: q.code, message: q.message });
-				logger.warn("Quarantined GJC plugin surface", { plugin: q.plugin, surface: q.surfaceId, code: q.code });
+		if (options.strictToolIsolation !== true) {
+			try {
+				const pluginToolResult = await loadAlwaysOnPluginTools({
+					cwd,
+					reservedToolNames: [...getReservedSubskillToolNames(), ...customTools.map(tool => tool.name)],
+				});
+				if (pluginToolResult.tools.length > 0) customTools.push(...pluginToolResult.tools);
+				for (const q of pluginToolResult.quarantine) {
+					gjcFindings.add({ identity: q.identity, surfaceId: q.surfaceId, code: q.code, message: q.message });
+					logger.warn("Quarantined GJC plugin surface", { plugin: q.plugin, surface: q.surfaceId, code: q.code });
+				}
+			} catch (error) {
+				gjcProducersComplete = false;
+				logger.warn("Failed to load always-on GJC plugin tools", { error });
 			}
-		} catch (error) {
-			gjcProducersComplete = false;
-			logger.warn("Failed to load always-on GJC plugin tools", { error });
 		}
 
 		const preExactCustomToolNames = customTools.map(tool => tool.name);
-		if (explicitMcpConfigPath !== undefined) {
+		if (options.strictToolIsolation !== true && explicitMcpConfigPath !== undefined) {
 			const owned = new MCPManager(cwd, null, {
 				toolsOnly: true,
 				...(lifecycleMcpStartupTimeoutMs !== undefined
@@ -1839,7 +1871,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					logger.warn("MCP tools could not be loaded.");
 				}
 			}
-		} else if (!mcpManager && !isCanonicalSubSession) {
+		} else if (options.strictToolIsolation !== true && !mcpManager && !isCanonicalSubSession) {
 			// Always-on GJC plugin-bundle MCP servers. Top-level sessions own a manager
 			// and connect the validated servers; subagents inherit the parent's manager
 			// via options.mcpManager and never spawn their own (prevents duplicate
@@ -1888,7 +1920,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				gjcProducersComplete = false;
 				logger.warn("Failed to wire GJC plugin MCP servers", { error });
 			}
-		} else if (isCanonicalSubSession) {
+		} else if (options.strictToolIsolation !== true && isCanonicalSubSession) {
 			// Subagent: inherit the parent's always-on plugin MCP tools WITHOUT
 			// owning the manager (no connect, no callbacks, no disposal). The
 			// top-level session installed its manager as the process-global
@@ -1915,39 +1947,50 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 		// Exact-config managers are session-local. Plugin managers keep their
 		// existing top-level singleton behavior for bundled runtime surfaces.
-		if (mcpManager && !mcpManager.isToolsOnly() && !isCanonicalSubSession && explicitMcpConfigPath === undefined) {
+		if (
+			options.strictToolIsolation !== true &&
+			mcpManager &&
+			!mcpManager.isToolsOnly() &&
+			!isCanonicalSubSession &&
+			explicitMcpConfigPath === undefined
+		) {
 			MCPManager.setInstance(mcpManager);
 		}
 
 		// Custom tool and extension discovery is quarantined from the public GJC utility surface.
 		// Explicit SDK extension factories are still honored; callers use them to
 		// register in-process tools/providers without enabling filesystem discovery.
-		const inlineExtensions: ExtensionFactory[] = [...(options.extensions ?? [])];
+		const inlineExtensions: ExtensionFactory[] =
+			options.strictToolIsolation === true ? [] : [...(options.extensions ?? [])];
 		if (customTools.length > 0) {
 			inlineExtensions.push(createCustomToolsExtension(customTools));
 		}
 
 		// Always-on constrained plugin hooks (validated registry surfaces). Additive
 		// and a no-op without installed plugins; the loader denies all dangerous APIs.
-		try {
-			const pluginHookResult = await loadConstrainedPluginHooks({ cwd });
-			if (pluginHookResult.hooks.length > 0) {
-				inlineExtensions.push(createPluginHooksExtension(pluginHookResult.hooks));
+		if (options.strictToolIsolation !== true) {
+			try {
+				const pluginHookResult = await loadConstrainedPluginHooks({ cwd });
+				if (pluginHookResult.hooks.length > 0) {
+					inlineExtensions.push(createPluginHooksExtension(pluginHookResult.hooks));
+				}
+				for (const q of pluginHookResult.quarantine) {
+					gjcFindings.add({ identity: q.identity, surfaceId: q.surfaceId, code: q.code, message: q.message });
+					logger.warn("Quarantined GJC plugin hook", { plugin: q.plugin, surface: q.surfaceId, code: q.code });
+				}
+			} catch (error) {
+				gjcProducersComplete = false;
+				logger.warn("Failed to load constrained GJC plugin hooks", { error });
 			}
-			for (const q of pluginHookResult.quarantine) {
-				gjcFindings.add({ identity: q.identity, surfaceId: q.surfaceId, code: q.code, message: q.message });
-				logger.warn("Quarantined GJC plugin hook", { plugin: q.plugin, surface: q.surfaceId, code: q.code });
-			}
-		} catch (error) {
-			gjcProducersComplete = false;
-			logger.warn("Failed to load constrained GJC plugin hooks", { error });
 		}
 
 		let notificationCfg: NotificationConfig | undefined;
-		try {
-			notificationCfg = getNotificationConfig(settings);
-		} catch {
-			notificationCfg = undefined;
+		if (options.strictToolIsolation !== true) {
+			try {
+				notificationCfg = getNotificationConfig(settings);
+			} catch {
+				notificationCfg = undefined;
+			}
 		}
 		const isTopLevelSdkSession = !isCanonicalSubSession;
 		// Consume the GJC spawn-provenance marker: read it once, then remove it
@@ -1974,16 +2017,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			spawnedByGjc,
 		});
 		if (
-			lifecycleStartupCapability ||
-			shouldRegisterGenericNotificationsExtension({
-				env: process.env,
-				cfg: notificationCfg,
-				taskDepth,
-				parentTaskPrefix: options.parentTaskPrefix,
-				currentAgentType: options.currentAgentType,
-				spawnedByGjc,
-			}) ||
-			(shouldHostSdk(notificationCfg, isTopLevelSdkSession) && (options.sdkHostModeSupported ?? true))
+			options.strictToolIsolation !== true &&
+			(lifecycleStartupCapability ||
+				shouldRegisterGenericNotificationsExtension({
+					env: process.env,
+					cfg: notificationCfg,
+					taskDepth,
+					parentTaskPrefix: options.parentTaskPrefix,
+					currentAgentType: options.currentAgentType,
+					spawnedByGjc,
+				}) ||
+				(shouldHostSdk(notificationCfg, isTopLevelSdkSession) && (options.sdkHostModeSupported ?? true)))
 		) {
 			inlineExtensions.push(async api => {
 				try {
@@ -2025,7 +2069,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			runtime: new ExtensionRuntime(),
 		};
 
-		if (!extensionsResult.extensions.some(extension => extension.path === BUNDLED_GROK_BUILD_EXTENSION_ID)) {
+		if (
+			options.strictToolIsolation !== true &&
+			!extensionsResult.extensions.some(extension => extension.path === BUNDLED_GROK_BUILD_EXTENSION_ID)
+		) {
 			const bundledGrokExtension = await loadExtensionFromFactory(
 				getBundledGrokBuildExtensionFactory(),
 				cwd,
@@ -2208,7 +2255,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			toolRegistry.set(tool.name, tool);
 		}
 		const goalStateToolNames = ["goal"] as const;
-		if (settings.get("goal.enabled")) {
+		if (options.strictToolIsolation !== true && settings.get("goal.enabled")) {
 			for (const name of goalStateToolNames) {
 				if (toolRegistry.has(name)) continue;
 				const goalStateTool = await logger.time(`createTools:${name}:session`, BUILTIN_TOOLS[name], toolSession);
@@ -2387,28 +2434,35 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		const toolNamesFromRegistry = Array.from(toolRegistry.keys());
 		const hasExplicitToolNames = options.toolNames !== undefined;
-		const requestedToolNames = hasExplicitToolNames
-			? [
-					...new Set([
-						...options.toolNames!.map(name => name.toLowerCase()),
-						...(settings.get("goal.enabled") ? ["goal"] : []),
-					]),
-				]
-			: toolNamesFromRegistry;
+		const requestedToolNames =
+			options.strictToolIsolation === true
+				? [...(options.toolNames ?? []).map(name => name.toLowerCase())]
+				: hasExplicitToolNames
+					? [
+							...new Set([
+								...options.toolNames!.map(name => name.toLowerCase()),
+								...(settings.get("goal.enabled") ? ["goal"] : []),
+							]),
+						]
+					: toolNamesFromRegistry;
 		const normalizedRequested = requestedToolNames.filter(name => toolRegistry.has(name));
 		const explicitRequestedToolNames = hasExplicitToolNames ? normalizedRequested : [];
 		const requestedToolNameSet = new Set(normalizedRequested);
 		// Normalize the user-facing mcp.discoveryMode alias once at session construction.
 		const toolsDiscoveryModeSetting = settings.get("tools.discoveryMode");
 		const effectiveDiscoveryMode: "off" | "mcp-only" | "all" =
-			toolsDiscoveryModeSetting !== "off"
-				? (toolsDiscoveryModeSetting as "mcp-only" | "all")
-				: settings.get("mcp.discoveryMode") || explicitMcpConfigPath !== undefined
-					? "mcp-only"
-					: "off";
+			options.strictToolIsolation === true
+				? "off"
+				: toolsDiscoveryModeSetting !== "off"
+					? (toolsDiscoveryModeSetting as "mcp-only" | "all")
+					: settings.get("mcp.discoveryMode") || explicitMcpConfigPath !== undefined
+						? "mcp-only"
+						: "off";
 		const mcpDiscoveryEnabled = effectiveDiscoveryMode !== "off";
 		const defaultInactiveToolNames = new Set(
-			registeredTools.filter(tool => tool.definition.defaultInactive).map(tool => tool.definition.name),
+			options.strictToolIsolation === true
+				? []
+				: registeredTools.filter(tool => tool.definition.defaultInactive).map(tool => tool.definition.name),
 		);
 		const requestedActiveToolNames = normalizedRequested;
 		const initialRequestedActiveToolNames = options.toolNames
@@ -2480,19 +2534,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// Custom, extension-registered, and plugin-bundle MCP tools are always
 		// included regardless of the caller's built-in tool filter. Plugin MCPs
 		// remain always-on even when generic MCP discovery is disabled.
-		const alwaysInclude: string[] = [
-			...(options.customTools?.map(t => (isCustomTool(t) ? t.name : t.name)) ?? []),
-			...registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
-			...pluginMcpToolNames,
-		];
+		const alwaysInclude: string[] =
+			options.strictToolIsolation === true
+				? [...(options.customTools?.map(t => (isCustomTool(t) ? t.name : t.name)) ?? [])]
+				: [
+						...(options.customTools?.map(t => (isCustomTool(t) ? t.name : t.name)) ?? []),
+						...registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
+						...pluginMcpToolNames,
+					];
 		const pluginMcpToolNameSet = new Set(pluginMcpToolNames);
 		for (const name of alwaysInclude) {
-			if (mcpDiscoveryEnabled && discoverableMCPToolNames.has(name) && !pluginMcpToolNameSet.has(name)) {
-				continue;
-			}
-			if (toolRegistry.has(name) && !initialToolNames.includes(name)) {
-				initialToolNames.push(name);
-			}
+			if (mcpDiscoveryEnabled && discoverableMCPToolNames.has(name) && !pluginMcpToolNameSet.has(name)) continue;
+			if (toolRegistry.has(name) && !initialToolNames.includes(name)) initialToolNames.push(name);
 		}
 
 		// When tools.discoveryMode === "all", hide non-essential built-in discoverable tools
@@ -2542,21 +2595,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				(options.toolNames!.length === 0 || explicitlyRequestedDiscoveredBuiltinToolNames.length > 0);
 		}
 
-		// Pre-register in the global agent registry BEFORE building the system prompt,
-		// so that subagents launched in the same parallel batch can see each other in
-		// their initial `# IRC Peers` block (rendered inside `rebuildSystemPrompt`).
-		// The session reference is attached after construction below.
-		agentRegistry.register({
-			id: resolvedAgentId,
-			displayName: resolvedAgentDisplayName,
-			rosterLabel: resolvedAgentRosterLabel,
-			kind: isCanonicalSubSession ? "sub" : "main",
-			parentId: options.parentTaskPrefix,
-			session: null,
-			sessionFile: sessionManager.getSessionFile() ?? null,
-			status: "running",
-		});
-		hasRegistered = true;
+		// Strictly isolated sessions must not register an IRC identity or affect
+		// the process-global registry.
+		if (agentRegistry !== undefined && resolvedAgentId !== undefined) {
+			agentRegistry.register({
+				id: resolvedAgentId,
+				displayName: resolvedAgentDisplayName,
+				rosterLabel: resolvedAgentRosterLabel,
+				kind: isCanonicalSubSession ? "sub" : "main",
+				parentId: options.parentTaskPrefix,
+				session: null,
+				sessionFile: sessionManager.getSessionFile() ?? null,
+				status: "running",
+			});
+			hasRegistered = true;
+		}
 
 		const { systemPrompt } = await logger.time(
 			"buildSystemPrompt",
@@ -2644,6 +2697,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					}),
 				),
 			);
+		if (options.strictToolIsolation === true) {
+			const expected = new Set([
+				...(options.toolNames ?? []).map(name => name.toLowerCase()),
+				...(options.customTools?.map(tool => (isCustomTool(tool) ? tool.name : tool.name)) ?? []),
+			]);
+			const actual = new Set(initialTools.map(tool => tool.name));
+			if (
+				actual.size !== expected.size ||
+				[...actual].some(name => !expected.has(name)) ||
+				[...expected].some(name => !actual.has(name))
+			)
+				throw new Error("strict tool isolation assembled an unexpected active tool set");
+		}
 
 		const openaiWebsocketSetting = settings.get("providers.openaiWebsockets") ?? "off";
 		const preferOpenAICodexWebsockets =
@@ -2863,6 +2929,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			obfuscator,
 			agentId: resolvedAgentId,
 			agentRegistry,
+			disableFileMentions: options.strictToolIsolation === true,
+			disableBackgroundIntegration: options.strictToolIsolation === true,
 			providerSessionId: options.providerSessionId,
 			providerCacheSessionId: providerSessionId,
 			forkContextSeed: options.forkContextSeed,
@@ -2880,26 +2948,24 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			build: buildMcpNotificationBatchMessage,
 		});
 
-		// Attach the live session to the pre-registered ref so peers can route IRC
-		// messages here. Refresh sessionFile in case it was unavailable at pre-register
-		// time. The dispose wrapper below unregisters on teardown.
-		agentRegistry.attachSession(resolvedAgentId, session, sessionManager.getSessionFile() ?? null);
-		{
-			const originalDispose = session.dispose.bind(session);
-			session.dispose = async () => {
+		// Attach the live session only when this session owns an IRC registry identity.
+		if (agentRegistry !== undefined && resolvedAgentId !== undefined)
+			agentRegistry.attachSession(resolvedAgentId, session, sessionManager.getSessionFile() ?? null);
+		const originalDispose = session.dispose.bind(session);
+		session.dispose = async () => {
+			try {
+				await originalDispose();
+			} finally {
 				try {
-					await originalDispose();
-				} finally {
-					try {
+					if (agentRegistry !== undefined && resolvedAgentId !== undefined)
 						agentRegistry.unregister(resolvedAgentId);
-						releaseCredentialDisabledSubscription();
-						releaseLocalProtocolOverride();
-					} finally {
-						closeOwnedAuthStorage();
-					}
+					releaseCredentialDisabledSubscription();
+					releaseLocalProtocolOverride();
+				} finally {
+					closeOwnedAuthStorage();
 				}
-			};
-		}
+			}
+		};
 
 		if (model?.api === "openai-codex-responses") {
 			const codexModel = model;
@@ -3087,7 +3153,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			if (hasSession) {
 				await session.dispose();
 			} else {
-				if (hasRegistered) agentRegistry.unregister(resolvedAgentId);
+				if (hasRegistered && agentRegistry !== undefined && resolvedAgentId !== undefined)
+					agentRegistry.unregister(resolvedAgentId);
 				await cleanupOwnedMcpManager?.();
 				await disposeKernelSessionsByOwner(evalKernelOwnerId);
 				await disposeVmContextsByOwner(evalKernelOwnerId);

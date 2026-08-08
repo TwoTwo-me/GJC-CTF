@@ -7,9 +7,11 @@ import * as path from "node:path";
 import {
 	applyOwnerOnlyPathSecurity,
 	canonicalExistingDirectoryIdentity,
+	ensureRootedArtifact,
 	exactRemoveDirectoryTree,
 	exactRestore,
 	exactUnlink,
+	readRootedArtifact,
 	snapshotDirectoryTree,
 	verifyOwnerOnlyPathSecurity,
 } from "../native/index.js";
@@ -616,6 +618,117 @@ describe.skipIf(process.platform === "win32")("POSIX native path identity", () =
 			expect(applyOwnerOnlyPathSecurity(file, "file")).toEqual({ ok: true });
 			expect(verifyOwnerOnlyPathSecurity(file, "file")).toEqual({ ok: true });
 			expect(await fs.readFile(file, "utf8")).toBe('{"preserve":true}');
+		},
+	);
+	it.skipIf(process.platform !== "linux")(
+		"publishes competition-local artifacts through retained directory descriptors",
+		async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-rooted-artifact-"));
+			temporaryDirectories.push(root);
+
+			expect(ensureRootedArtifact(root, ["skills", "example"], "SKILL.md", Buffer.from("trusted"), 64)).toEqual({
+				ok: true,
+				created: true,
+			});
+			expect(ensureRootedArtifact(root, ["skills", "example"], "SKILL.md", Buffer.from("replacement"), 64)).toEqual({
+				ok: true,
+				created: false,
+				bytes: Buffer.from("trusted"),
+			});
+			expect(readRootedArtifact(root, ["skills", "example"], "SKILL.md", 64)).toEqual({
+				ok: true,
+				created: false,
+				bytes: Buffer.from("trusted"),
+			});
+			expect(ensureRootedArtifact(root, ["skills", "example"], "other", Buffer.alloc(65), 64)).toEqual({
+				ok: false,
+				created: false,
+				code: "too_large",
+			});
+		},
+	);
+
+	it.skipIf(process.platform !== "linux")(
+		"rejects symlink artifact leaves and ancestors without following them",
+		async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-rooted-artifact-"));
+			temporaryDirectories.push(root);
+			const outside = await fs.mkdtemp(path.join(os.tmpdir(), "pi-rooted-artifact-outside-"));
+			temporaryDirectories.push(outside);
+			await fs.symlink(outside, path.join(root, "linked"));
+			await fs.mkdir(path.join(root, "skills"));
+			await fs.writeFile(path.join(outside, "SKILL.md"), "outside");
+			await fs.symlink(path.join(outside, "SKILL.md"), path.join(root, "skills", "SKILL.md"));
+
+			expect(ensureRootedArtifact(root, ["linked"], "SKILL.md", Buffer.from("trusted"), 64)).toEqual({
+				ok: false,
+				created: false,
+				code: "invalid_path",
+			});
+			expect(readRootedArtifact(root, ["skills"], "SKILL.md", 64)).toEqual({
+				ok: false,
+				created: false,
+				code: "invalid_path",
+			});
+			expect(await fs.readFile(path.join(outside, "SKILL.md"), "utf8")).toBe("outside");
+		},
+	);
+
+	it.skipIf(process.platform !== "linux")("returns an exact existing regular-file handle for conflicts", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-rooted-artifact-"));
+		temporaryDirectories.push(root);
+		await fs.mkdir(path.join(root, "skills"));
+		await fs.mkdir(path.join(root, "skills", "example"));
+		await fs.writeFile(path.join(root, "skills", "example", "SKILL.md"), "existing");
+
+		expect(ensureRootedArtifact(root, ["skills", "example"], "SKILL.md", Buffer.from("new"), 64)).toEqual({
+			ok: true,
+			created: false,
+			bytes: Buffer.from("existing"),
+		});
+		await fs.mkdir(path.join(root, "skills", "example", "directory"));
+		expect(ensureRootedArtifact(root, ["skills", "example"], "directory", Buffer.from("new"), 64)).toEqual({
+			ok: false,
+			created: false,
+			code: "conflict",
+		});
+	});
+
+	it.skipIf(process.platform !== "linux")(
+		"fails closed when a renamed root pathname is replaced by a symlink",
+		async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-rooted-artifact-"));
+			temporaryDirectories.push(root);
+			const retainedOriginal = `${root}-original`;
+			temporaryDirectories.push(retainedOriginal);
+			const outside = await fs.mkdtemp(path.join(os.tmpdir(), "pi-rooted-artifact-outside-"));
+			temporaryDirectories.push(outside);
+			await fs.rename(root, retainedOriginal);
+			await fs.symlink(outside, root);
+
+			expect(ensureRootedArtifact(root, ["skills"], "SKILL.md", Buffer.from("trusted"), 64)).toEqual({
+				ok: false,
+				created: false,
+				code: "invalid_path",
+			});
+			expect(
+				await fs.stat(path.join(outside, "skills")).then(
+					() => true,
+					() => false,
+				),
+			).toBe(false);
+		},
+	);
+	it.skipIf(process.platform === "linux")(
+		"fails closed without mutation when descriptor-relative publication is unavailable",
+		async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-rooted-artifact-"));
+			temporaryDirectories.push(root);
+			expect(ensureRootedArtifact(root, ["skills"], "SKILL.md", Buffer.from("trusted"), 64)).toMatchObject({
+				ok: false,
+				created: false,
+			});
+			expect(await fs.readdir(root)).toEqual([]);
 		},
 	);
 });

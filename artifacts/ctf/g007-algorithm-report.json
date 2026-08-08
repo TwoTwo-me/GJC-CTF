@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "kind": "algorithm-boundary-report",
+  "sourceHash": "sha256:83b2da6254ac91ccb74d1b128f932c7ba5c6df7e1d71d2d8a2373856b7123e70",
+  "command": "bun test packages/coding-agent/test/ctf benchmarks/gjc-ctf/repeat-runner.test.ts",
+  "exitCode": 0,
+  "summary": "163 tests passed, 0 failed, 615 assertions across 26 files.",
+  "adversarialCoverage": [
+    "non-bypassable solver-work deadline with cooperative phase cancellation and awaited canonical finalization",
+    "regex-grid malformed/unsafe-source refusal",
+    "private content-addressed branded Z3 copy with version, digest, mode, and inode revalidation",
+    "streaming Z3 output and timeout enforcement",
+    "candidate nonogram semantic validation",
+    "explicit analyzer refusal/cancellation without fallback",
+    "stable no-follow visible input reads with exact digest mappings and aggregate budgets",
+    "atomic artifact staging with structured path/digest/size evidence and oversized-candidate rejection",
+    "post-admission scheduler failure finalization",
+    "real durable-run cancellation persists one matching aborted terminal outcome",
+    "terminal persistence integrity failures remain visible even after deadline cancellation",
+    "malformed and path-mismatched artifact evidence rejection",
+    "optimizer signed-report count coherence",
+    "campaign corruption and identity rejection",
+    "candidate/unknown/failure retention"
+  ],
+  "campaignEvidence": {
+    "campaignId": "lactf-2026-local",
+    "stateDigest": "59a108c8c04594bc7dba940a0186c22f7f37c4b0612daa949eed1f05ae439b8d",
+    "flagFinderAttempt": 5,
+    "status": "candidate",
+    "candidateVerified": false,
+    "archiveFlagUsed": false,
+    "trustedOracleUsed": false
+  }
+}

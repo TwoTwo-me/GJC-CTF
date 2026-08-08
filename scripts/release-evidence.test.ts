@@ -38,6 +38,7 @@ import {
 	type TarballLimits,
 } from "./release-evidence";
 import {
+	assertCanonicalCodingAgentCtfTarballMembers,
 	downloadNpmRegistryTarball,
 	publishRetainedPackage,
 	assertReleaseSerializationGuard,
@@ -142,6 +143,32 @@ describe("release package evidence", () => {
 		expect(record.manifest_sha256).toBe(createHash("sha256").update(Buffer.from(rawManifest)).digest("hex"));
 		expect(record.manifest_sha256).not.toBe(sha256(Buffer.from(`${JSON.stringify(JSON.parse(rawManifest))}\n`)));
 		validateExpectedTarball(record, tarball);
+	});
+	test("requires the scoped CTF tarball's canonical archive and CLI members", () => {
+		const archive = Buffer.from("canonical dashboard archive\n");
+		const cli = Buffer.from("#!/usr/bin/env bun\n");
+		const canonicalMembers = [
+			{ path: "src/ctf/dashboard/embedded-client.generated.txt", bytes: archive },
+			{ path: "bin/gjc-ctf.js", bytes: cli },
+		];
+		const tarball = fixtureTarballEntries([
+			{ path: "package/package.json", data: Buffer.from('{"name":"@gajae-code/coding-agent","version":"1.2.3"}\n') },
+			{ path: "package/src/ctf/dashboard/embedded-client.generated.txt", data: archive },
+			{ path: "package/bin/gjc-ctf.js", data: cli },
+		]);
+
+		expect(() => assertCanonicalCodingAgentCtfTarballMembers(tarball, canonicalMembers)).not.toThrow();
+		expect(() => assertCanonicalCodingAgentCtfTarballMembers(fixtureTarballEntries([
+			{ path: "package/bin/gjc-ctf.js", data: cli },
+		]), canonicalMembers)).toThrow("missing canonical member src/ctf/dashboard/embedded-client.generated.txt");
+		expect(() => assertCanonicalCodingAgentCtfTarballMembers(fixtureTarballEntries([
+			{ path: "package/src/ctf/dashboard/embedded-client.generated.txt", data: Buffer.from("changed") },
+			{ path: "package/bin/gjc-ctf.js", data: cli },
+		]), canonicalMembers)).toThrow("does not match its canonical source");
+		expect(() => assertCanonicalCodingAgentCtfTarballMembers(fixtureTarballEntries([
+			{ path: "package/src/ctf/dashboard/embedded-client.generated.txt", data: archive },
+			{ path: "package/bin/gjc-ctf.js", data: Buffer.alloc(0) },
+		]), canonicalMembers)).toThrow("must be nonempty");
 	});
 
 	test("rejects workspace, file, ranged, and stale internal dependency forms in every packed field", () => {
