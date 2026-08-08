@@ -1,9 +1,9 @@
 import * as z from "zod/v4";
 import { DigestSchema } from "../../packages/coding-agent/src/ctf/contracts/common";
-import { canonicalDigest, canonicalJson, digestsEqual, isDigest, type Digest } from "../../packages/coding-agent/src/ctf/contracts/digest";
+import { canonicalDigest, canonicalJson, digestsEqual, type Digest } from "../../packages/coding-agent/src/ctf/contracts/digest";
 import { CtfError } from "../../packages/coding-agent/src/ctf/contracts/errors";
 import { nearestRank, passAtK, validateMetricsReport, type MetricRunRecord, type MetricsReportV1 } from "../../packages/coding-agent/src/ctf/contracts/metrics";
-import { validateBenchmarkLock, validateBenchmarkManifest } from "../../packages/coding-agent/src/ctf/contracts/benchmark";
+import { BenchmarkImplementationIdentitySchema, validateBenchmarkLock, validateBenchmarkManifest } from "../../packages/coding-agent/src/ctf/contracts/benchmark";
 import { validateBenchmarkCalibration } from "../../packages/coding-agent/src/ctf/runtime/policy";
 import { evaluateBenchmarkReport, type BenchmarkReportRequest } from "./metrics";
 import type { BenchmarkEvaluatorCapability } from "./manifest";
@@ -15,11 +15,10 @@ export type VersionStatValue<T> = { status: "known"; value: T } | { status: "unk
 
 /** Immutable provenance required to identify a benchmark version. */
 export const VersionStatsIdentitySchema = z.object({
-	harnessDigest: DigestSchema,
+	implementationIdentity: BenchmarkImplementationIdentitySchema,
 	effectiveSkillDigest: DigestSchema,
 	modelFingerprint: DigestSchema,
 	backendFingerprint: DigestSchema,
-	toolchainDigest: DigestSchema,
 	corpusDigest: DigestSchema,
 	calibrationDigest: DigestSchema,
 	benchmarkLockDigest: DigestSchema,
@@ -39,7 +38,7 @@ const CategoryStatsSchema = z.object({
 export type CategoryStats = z.infer<typeof CategoryStatsSchema>;
 
 export const VersionStatsV1Schema = z.object({
-	schemaVersion: z.literal("gjc-ctf-version-stats-1"),
+	schemaVersion: z.literal("gjc-ctf-version-stats-2"),
 	identity: VersionStatsIdentitySchema,
 	identityDigest: DigestSchema,
 	reportFingerprint: DigestSchema,
@@ -99,7 +98,7 @@ function passForRuns(runs: readonly MetricRunRecord[], k: number): VersionStatVa
 function assertIdentityMatchesReport(identity: VersionStatsIdentity, report: MetricsReportV1): void {
 	if (report.calibrationDigest === undefined || report.eligibleChallengeIds === undefined)
 		throw new CtfError("missing_provenance", "version statistics require calibrated eligible metrics reports");
-	const mismatch = report.benchmarkLockDigest !== identity.benchmarkLockDigest || report.calibrationDigest !== identity.calibrationDigest || report.runs.some(run => run.effectiveSkillDigest !== identity.effectiveSkillDigest || run.modelFingerprint !== identity.modelFingerprint || run.backendFingerprint !== identity.backendFingerprint || run.benchmarkLockDigest !== identity.benchmarkLockDigest || run.calibrationDigest !== identity.calibrationDigest);
+	const mismatch = report.implementationIdentity === undefined || canonicalDigest(report.implementationIdentity) !== canonicalDigest(identity.implementationIdentity) || report.benchmarkLockDigest !== identity.benchmarkLockDigest || report.calibrationDigest !== identity.calibrationDigest || report.runs.some(run => run.effectiveSkillDigest !== identity.effectiveSkillDigest || run.modelFingerprint !== identity.modelFingerprint || run.backendFingerprint !== identity.backendFingerprint || run.benchmarkLockDigest !== identity.benchmarkLockDigest || run.calibrationDigest !== identity.calibrationDigest);
 	if (mismatch) throw new CtfError("benchmark_lock_mismatch", "version statistics identity does not match report run identities");
 }
 
@@ -138,7 +137,7 @@ function computeAuthorizedVersionStats(input: AuthorizedVersionStatsInput): Vers
 	const knownRuns = report.runs.filter(run => run.outcome !== "unknown");
 	const firstValid = report.runs.filter(run => run.outcome === "pass" && run.validatedSolve && run.firstValidTimeMs !== null).map(run => run.firstValidTimeMs as number);
 	const result: Omit<VersionStatsV1, "fingerprint"> = {
-		schemaVersion: "gjc-ctf-version-stats-1", identity, identityDigest: versionStatsIdentityDigest(identity), reportFingerprint: report.fingerprint,
+		schemaVersion: "gjc-ctf-version-stats-2", identity, identityDigest: versionStatsIdentityDigest(identity), reportFingerprint: report.fingerprint,
 		eligibleDenominator: eligible.length, independentlyVerifiedSolveCount: solveCount,
 		independentlyVerifiedSolveRate: complete ? known(solveCount / eligible.length) : unknown("eligible evidence is incomplete"), passAt1: passAverage(challengePass1, "pass@1"), passAt3: passAverage(challengePass3, "pass@3"),
 		firstValidLatencyMs: firstValid.length === 0 ? unknown("no independently verified solve latency") : known(nearestRank(firstValid, 0.5)!),
@@ -153,18 +152,17 @@ function assertProductionIdentity(identity: VersionStatsIdentity, request: Recor
 	const manifest = validateBenchmarkManifest(request.manifest);
 	const lock = validateBenchmarkLock(request.lock);
 	const calibration = validateBenchmarkCalibration(request.calibration, { requireBenchmark: true });
-	const preflightReportDigest = request.preflightReportDigest;
-	const runtimeEvidenceDigest = request.runtimeEvidenceDigest;
+	const implementationIdentity = BenchmarkImplementationIdentitySchema.safeParse(request.implementationIdentity);
 	if (
-		!isDigest(preflightReportDigest) ||
-		!isDigest(runtimeEvidenceDigest) ||
+		!implementationIdentity.success ||
+		report.implementationIdentity === undefined ||
+		canonicalDigest(identity.implementationIdentity) !== canonicalDigest(implementationIdentity.data) ||
+		canonicalDigest(report.implementationIdentity) !== canonicalDigest(implementationIdentity.data) ||
 		identity.corpusDigest !== lock.corpusDigest ||
 		identity.modelFingerprint !== lock.modelConfigDigest ||
 		identity.backendFingerprint !== lock.backendPolicyDigest ||
 		identity.calibrationDigest !== calibration.calibrationDigest ||
 		identity.benchmarkLockDigest !== lock.lockDigest ||
-		identity.harnessDigest !== preflightReportDigest ||
-		identity.toolchainDigest !== runtimeEvidenceDigest ||
 		identity.effectiveSkillDigest !== canonicalDigest(manifest.skill) ||
 		report.runs.length === 0 ||
 		report.runs.some(run => run.effectiveSkillDigest !== identity.effectiveSkillDigest)
