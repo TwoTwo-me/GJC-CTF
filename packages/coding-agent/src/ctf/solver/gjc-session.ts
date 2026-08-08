@@ -1,14 +1,29 @@
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
+import { ThinkingLevel as AgentThinkingLevel } from "@gajae-code/agent-core";
 import type { AssistantMessage } from "@gajae-code/ai";
+import * as z from "zod/v4";
 import { Settings } from "../../config/settings";
+import type { CustomTool } from "../../extensibility/custom-tools/types";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "../../sdk/session";
 import type { AgentSession, PromptOptions } from "../../session/agent-session";
-import type { LocalSolverSession, LocalSolverSessionInput, LocalSolverSessionResult } from "./local-backend";
+import { SessionManager } from "../../session/session-manager";
+import type {
+	LocalSolverSession,
+	LocalSolverSessionInput,
+	LocalSolverSessionLifecycle,
+	LocalSolverSessionResult,
+} from "./local-backend";
 import localSolverPrompt from "./local-solver-prompt.md" with { type: "text" };
 
 const MAX_PROMPT_BYTES = 512 * 1024;
 const MAX_CANDIDATE_BYTES = 64 * 1024;
 const MAX_NOTES_BYTES = 8 * 1024;
+const MAX_PROCESS_ACTION_BYTES = 64 * 1024;
+const MAX_PROCESS_SEND_CHARS = 64 * 1024;
+const PROCESS_SEND_PARAMETERS = z.object({
+	content: z.string().max(MAX_PROCESS_SEND_CHARS, "local process send exceeds character bound"),
+});
 
 const RESULT_SCHEMA = Object.freeze({
 	type: "object",
@@ -21,7 +36,6 @@ const RESULT_SCHEMA = Object.freeze({
 });
 
 type LocalAgentSession = Pick<AgentSession, "abort" | "dispose" | "getLastAssistantMessage" | "prompt">;
-
 type LocalAgentSessionResult = Readonly<{ session: LocalAgentSession }>;
 
 export type LocalAgentSessionFactory = (
@@ -29,13 +43,13 @@ export type LocalAgentSessionFactory = (
 ) => Promise<CreateAgentSessionResult | LocalAgentSessionResult>;
 
 export type GjcLocalSolverSessionOptions = Readonly<{
-	cwd?: string;
+	/** Optional reviewed-configuration assertions; they cannot override route input. */
 	modelPattern?: string;
-	modelPatternFor?: (input: LocalSolverSessionInput) => string | undefined;
-	thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"];
-	thinkingLevelFor?: (input: LocalSolverSessionInput) => CreateAgentSessionOptions["thinkingLevel"] | undefined;
+	thinkingLevel?: LocalSolverSessionInput["thinkingLevel"];
 	createSession: LocalAgentSessionFactory;
 }>;
+
+export type GjcLocalSolverSessionLifecycle = LocalSolverSessionLifecycle;
 
 type ParsedSolverResult = Readonly<{ candidate: string; notes: string }>;
 
@@ -105,65 +119,179 @@ function isolatedSettings(): Settings {
 	);
 }
 
+function assertReviewedAuthority(input: LocalSolverSessionInput, options: GjcLocalSolverSessionOptions): void {
+	if (options.modelPattern !== undefined && options.modelPattern !== input.modelPattern)
+		throw new Error("local solver model pattern conflicts with the reviewed route");
+	if (options.thinkingLevel !== undefined && options.thinkingLevel !== input.thinkingLevel)
+		throw new Error("local solver thinking level conflicts with the reviewed route");
+	if (input.signal.aborted) throw new Error("local solver attempt was cancelled");
+	if (input.adapterKind === "offline-checker" && input.evaluationAdapter !== undefined)
+		throw new Error("offline routes do not accept evaluation adapters");
+	if (input.adapterKind === "browser-session") throw new Error("browser solver routes are disabled");
+	if (
+		input.adapterKind === "process-service" &&
+		(input.evaluationAdapter === undefined ||
+			input.evaluationAdapter.adapterKind !== "process-service" ||
+			typeof input.evaluationAdapter.process.send !== "function" ||
+			typeof input.evaluationAdapter.process.receive !== "function" ||
+			typeof input.evaluationAdapter.process.restart !== "function")
+	)
+		throw new Error("process solver route requires its matching evaluation adapter");
+}
+
+function processTools(input: LocalSolverSessionInput): CustomTool[] {
+	if (input.adapterKind !== "process-service") return [];
+	const adapter = input.evaluationAdapter;
+	if (adapter === undefined || adapter.adapterKind !== "process-service")
+		throw new Error("process solver route requires its matching evaluation adapter");
+	const assertActive = () => {
+		if (input.signal.aborted) throw new Error("local solver attempt was cancelled");
+	};
+	return [
+		{
+			name: "ctf_process_send",
+			label: "CTF Process Send",
+			description: "Send UTF-8 input to the reviewed local process service.",
+			parameters: PROCESS_SEND_PARAMETERS,
+			async execute(_toolCallId, params) {
+				assertActive();
+				const parsed = PROCESS_SEND_PARAMETERS.parse(params);
+				if (parsed.content.length > MAX_PROCESS_SEND_CHARS)
+					throw new Error("local process send exceeds character bound");
+				const content = new TextEncoder().encode(parsed.content);
+				if (content.byteLength > MAX_PROCESS_ACTION_BYTES) throw new Error("local process send exceeds byte bound");
+				await adapter.process.send(content);
+				assertActive();
+				return { content: [{ type: "text", text: "sent" }] };
+			},
+		},
+		{
+			name: "ctf_process_receive",
+			label: "CTF Process Receive",
+			description: "Receive bounded output from the reviewed local process service.",
+			parameters: z.object({}),
+			async execute() {
+				assertActive();
+				const content = await adapter.process.receive();
+				assertActive();
+				if (!(content instanceof Uint8Array) || content.byteLength > MAX_PROCESS_ACTION_BYTES)
+					throw new Error("local process receive exceeds byte bound");
+				return { content: [{ type: "text", text: new TextDecoder("utf-8", { fatal: false }).decode(content) }] };
+			},
+		},
+		{
+			name: "ctf_process_restart",
+			label: "CTF Process Restart",
+			description: "Restart the reviewed local process service.",
+			parameters: z.object({}),
+			async execute() {
+				assertActive();
+				await adapter.process.restart();
+				assertActive();
+				return { content: [{ type: "text", text: "restarted" }] };
+			},
+		},
+	];
+}
+
 async function solveWithAgent(
 	input: LocalSolverSessionInput,
 	options: GjcLocalSolverSessionOptions,
 ): Promise<LocalSolverSessionResult> {
 	if (input.network !== "off" || input.credentials !== "none" || input.allowedTools.length !== 0)
 		throw new Error("local agent session authority is not clean-room compatible");
-	if (input.signal.aborted) throw new Error("local solver attempt was cancelled");
-	const createSession = options.createSession;
-	const created = await createSession({
-		cwd: options.cwd ?? os.tmpdir(),
-		modelPattern: options.modelPatternFor?.(input) ?? options.modelPattern,
-		thinkingLevel: options.thinkingLevelFor?.(input) ?? options.thinkingLevel,
-		systemPrompt: [localSolverPrompt],
-		toolNames: [],
-		customTools: [],
-		skills: [],
-		rules: [],
-		contextFiles: [],
-		promptTemplates: [],
-		slashCommands: [],
-		extensions: [],
-		additionalExtensionPaths: [],
-		disableExtensionDiscovery: true,
-		enableLsp: false,
-		skipPythonPreflight: true,
-		requireYieldTool: false,
-		hasUI: false,
-		settings: isolatedSettings(),
-		outputSchema: RESULT_SCHEMA,
-	});
-	const session = created.session;
-	const abort = () => {
-		void session
-			.abort({ goalReason: "internal", timeoutMs: 1_000, cause: input.signal.reason })
-			.catch(() => undefined);
-	};
-	input.signal.addEventListener("abort", abort, { once: true });
-	if (input.signal.aborted) abort();
+	assertReviewedAuthority(input, options);
+	const cwd = await fs.mkdtemp(`${os.tmpdir()}/gjc-local-solver-`);
+	let session: LocalAgentSession | undefined;
 	try {
-		const promptOptions: PromptOptions = { expandPromptTemplates: false, attribution: "agent" };
-		await session.prompt(renderVisibleInput(input), promptOptions);
+		const created = await options.createSession({
+			cwd,
+			modelPattern: input.modelPattern,
+			thinkingLevel: input.thinkingLevel === "high" ? AgentThinkingLevel.High : AgentThinkingLevel.Medium,
+			systemPrompt: [localSolverPrompt],
+			toolNames: [],
+			customTools: processTools(input),
+			skills: [],
+			rules: [],
+			contextFiles: [],
+			workspaceTree: { rootPath: cwd, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+			sessionManager: SessionManager.inMemory(cwd),
+			strictToolIsolation: true,
+			promptTemplates: [],
+			slashCommands: [],
+			extensions: [],
+			additionalExtensionPaths: [],
+			disableExtensionDiscovery: true,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			requireYieldTool: false,
+			hasUI: false,
+			settings: isolatedSettings(),
+			outputSchema: RESULT_SCHEMA,
+		});
+		const acquiredSession = created.session;
+		session = acquiredSession;
 		if (input.signal.aborted) throw new Error("local solver attempt was cancelled");
-		const parsed = parseResult(session.getLastAssistantMessage());
-		if (parsed.candidate === "") return {};
-		const notes = new TextEncoder().encode(parsed.notes);
-		return {
-			candidate: parsed.candidate,
-			artifacts: parsed.notes === "" ? [] : [{ path: "analysis.txt", content: notes }],
+		const abort = () => {
+			void acquiredSession
+				.abort({ goalReason: "internal", timeoutMs: 1_000, cause: input.signal.reason })
+				.catch(() => undefined);
 		};
+		input.signal.addEventListener("abort", abort, { once: true });
+		if (input.signal.aborted) abort();
+		try {
+			const promptOptions: PromptOptions = { expandPromptTemplates: false, attribution: "agent" };
+			await acquiredSession.prompt(renderVisibleInput(input), promptOptions);
+			if (input.signal.aborted) throw new Error("local solver attempt was cancelled");
+			const parsed = parseResult(acquiredSession.getLastAssistantMessage());
+			if (parsed.candidate === "") return {};
+			return {
+				candidate: parsed.candidate,
+				artifacts:
+					parsed.notes === "" ? [] : [{ path: "analysis.txt", content: new TextEncoder().encode(parsed.notes) }],
+			};
+		} finally {
+			input.signal.removeEventListener("abort", abort);
+		}
 	} finally {
-		input.signal.removeEventListener("abort", abort);
-		await session.dispose();
+		try {
+			await session?.dispose();
+		} finally {
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
 	}
 }
 
 export function createGjcLocalSolverSessionFactory(
 	options: GjcLocalSolverSessionOptions,
-): (request: unknown) => Promise<LocalSolverSession> {
-	return async () => ({
-		solve: async input => await solveWithAgent(input, options),
-	});
+): (request: unknown) => GjcLocalSolverSessionLifecycle {
+	return () => {
+		const controller = new AbortController();
+		const quiescence = Promise.withResolvers<void>();
+		let active: Promise<LocalSolverSessionResult> | undefined;
+		const session: LocalSolverSession = {
+			solve: async input => {
+				if (active !== undefined) throw new Error("local solver session already has an active attempt");
+				const abort = () => controller.abort(input.signal.reason);
+				if (input.signal.aborted) abort();
+				else input.signal.addEventListener("abort", abort, { once: true });
+				active = solveWithAgent({ ...input, signal: controller.signal }, options);
+				try {
+					return await active;
+				} finally {
+					input.signal.removeEventListener("abort", abort);
+					quiescence.resolve();
+				}
+			},
+		};
+		return {
+			session: Promise.resolve(session),
+			terminate: async () => {
+				controller.abort(new Error("local solver session terminated"));
+				if (active !== undefined) await active.catch(() => undefined);
+				quiescence.resolve();
+			},
+			quiesced: quiescence.promise,
+		};
+	};
 }
