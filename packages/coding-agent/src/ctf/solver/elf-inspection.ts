@@ -4,6 +4,10 @@ const ELF_HEADER_BYTES = 64;
 const PROGRAM_HEADER_BYTES = 56;
 const MAX_ELF_BYTES = 16 * 1024 * 1024;
 const MAX_PROGRAM_HEADERS = 32;
+const MAX_ASCII_STRINGS = 128;
+const MAX_ASCII_STRING_BYTES = 256;
+const MIN_ASCII_STRING_BYTES = 4;
+const FLAG_PATH_PATTERN = /(?:^|[/\s])flag\.[A-Za-z0-9_-]+(?:$|[/\s])/iu;
 const PT_GNU_STACK = 0x6474_e551;
 const PT_GNU_RELRO = 0x6474_e552;
 const PF_X = 1;
@@ -17,6 +21,13 @@ export type ElfProgramHeaderSummary = Readonly<{
 	memorySize: string;
 }>;
 
+export type ElfAsciiStringSummary = Readonly<{
+	offset: string;
+	text: string;
+	truncated: boolean;
+	redacted: boolean;
+}>;
+
 export type ElfInspection = Readonly<{
 	inputSha256: string;
 	class: "ELF64";
@@ -25,6 +36,7 @@ export type ElfInspection = Readonly<{
 	type: "ET_EXEC" | "ET_DYN";
 	entry: string;
 	programHeaders: readonly ElfProgramHeaderSummary[];
+	asciiStrings: readonly ElfAsciiStringSummary[];
 	mitigations: Readonly<{
 		pie: "disabled" | "unknown";
 		nx: "enabled" | "disabled" | "unknown";
@@ -51,6 +63,35 @@ function checkedRange(offset: bigint, size: bigint, length: number): number {
 function u64(view: DataView, offset: number): bigint {
 	if (offset < 0 || offset > view.byteLength - 8) malformed();
 	return view.getBigUint64(offset, true);
+}
+
+function inspectAsciiStrings(bytes: Uint8Array): readonly ElfAsciiStringSummary[] {
+	const strings: ElfAsciiStringSummary[] = [];
+	let offset = 0;
+	while (offset < bytes.byteLength && strings.length < MAX_ASCII_STRINGS) {
+		while (offset < bytes.byteLength && (bytes[offset]! < 0x20 || bytes[offset]! > 0x7e)) offset++;
+		const start = offset;
+		let braceShaped = false;
+		while (offset < bytes.byteLength && bytes[offset]! >= 0x20 && bytes[offset]! <= 0x7e) {
+			if (bytes[offset] === 0x7b || bytes[offset] === 0x7d) braceShaped = true;
+			offset++;
+		}
+		const length = offset - start;
+		if (length < MIN_ASCII_STRING_BYTES) continue;
+		const inspectedLength = Math.min(length, MAX_ASCII_STRING_BYTES);
+		const rawText = new TextDecoder("ascii", { fatal: true }).decode(bytes.subarray(start, start + inspectedLength));
+		const redacted = braceShaped || FLAG_PATH_PATTERN.test(rawText);
+		const text = redacted ? "[redacted flag-shaped string]" : rawText;
+		strings.push(
+			Object.freeze({
+				offset: hex(BigInt(start)),
+				text,
+				truncated: length > MAX_ASCII_STRING_BYTES,
+				redacted,
+			}),
+		);
+	}
+	return Object.freeze(strings);
 }
 
 /** Inspects only a bounded, in-memory ELF byte sequence; it never resolves paths or executes content. */
@@ -123,6 +164,7 @@ export function inspectElf64X86_64(bytes: Uint8Array): ElfInspection {
 		type: type === 2 ? "ET_EXEC" : "ET_DYN",
 		entry: hex(u64(view, 24)),
 		programHeaders: Object.freeze(programHeaders),
+		asciiStrings: inspectAsciiStrings(bytes),
 		mitigations: Object.freeze({ pie: type === 2 ? "disabled" : "unknown", nx, relroSegment }),
 	});
 }

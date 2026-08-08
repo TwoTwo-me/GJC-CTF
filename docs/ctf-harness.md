@@ -67,7 +67,7 @@ The programmatic path is intentionally explicit:
 
 ### Pwn diagnostics
 
-The Tic-Tac-No route exposes canonical base64 process I/O and a bounded in-memory ELF64/x86-64 inspector. ELF inspection reports structural facts only. It does not execute the binary, recover a flag, verify a candidate, or count as a solve.
+The Tic-Tac-No route exposes canonical base64 process I/O and a bounded in-memory ELF64/x86-64 inspector. ELF inspection reports headers, mitigations, and a capped set of printable strings; brace-shaped candidate material and flag-like file references are redacted before the model sees them. It does not execute the binary, recover a flag, verify a candidate, or count as a solve.
 
 The rootless Podman provider is an opt-in composition surface. It requires the exact pinned image to exist locally and uses `--pull=never`; absence fails closed rather than pulling or falling back to host execution. The provider must remain rootless, local-only, network-disabled, digest-bound, resource-bounded, and container-identity-aware.
 

@@ -65,8 +65,61 @@ describe("ELF inspection", () => {
 					memorySize: "0x0",
 				},
 			],
+			asciiStrings: [],
 			mitigations: { pie: "unknown", nx: "enabled", relroSegment: true },
 		});
+	});
+
+	it("reports bounded printable strings and redacts brace-shaped candidate material", () => {
+		const base = elf64();
+		const payload = new TextEncoder().encode(`visible-prompt\0synthetic{not-evidence}\0${"A".repeat(300)}{late}\0`);
+		const bytes = new Uint8Array(base.byteLength + payload.byteLength);
+		bytes.set(base);
+		bytes.set(payload, base.byteLength);
+
+		expect(inspectElf64X86_64(bytes).asciiStrings).toEqual([
+			{ offset: "0x40", text: "visible-prompt", truncated: false, redacted: false },
+			{
+				offset: "0x4f",
+				text: "[redacted flag-shaped string]",
+				truncated: false,
+				redacted: true,
+			},
+			{
+				offset: "0x67",
+				text: "[redacted flag-shaped string]",
+				truncated: true,
+				redacted: true,
+			},
+		]);
+	});
+
+	it("redacts flag-like file references without hiding ordinary flag prose", () => {
+		const base = elf64();
+		const payload = new TextEncoder().encode("the flag is guarded\0flag.txt\0");
+		const bytes = new Uint8Array(base.byteLength + payload.byteLength);
+		bytes.set(base);
+		bytes.set(payload, base.byteLength);
+		expect(inspectElf64X86_64(bytes).asciiStrings).toEqual([
+			{ offset: "0x40", text: "the flag is guarded", truncated: false, redacted: false },
+			{
+				offset: "0x54",
+				text: "[redacted flag-shaped string]",
+				truncated: false,
+				redacted: true,
+			},
+		]);
+	});
+
+	it("caps the printable-string count", () => {
+		const base = elf64();
+		const payload = new TextEncoder().encode(
+			`${Array.from({ length: 130 }, (_, index) => `item-${index}`).join("\0")}\0`,
+		);
+		const bytes = new Uint8Array(base.byteLength + payload.byteLength);
+		bytes.set(base);
+		bytes.set(payload, base.byteLength);
+		expect(inspectElf64X86_64(bytes).asciiStrings).toHaveLength(128);
 	});
 	it("honors typed-array windows rather than inspecting the backing buffer", () => {
 		const source = elf64();
