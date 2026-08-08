@@ -94,6 +94,7 @@ Repository evidence lives under `artifacts/ctf/`:
 - `lactf-version-observation-v2.json`: immutable per-version diagnostic comparison.
 - `lactf-expanded-v2-invalidation.json`: revocation record for an earlier campaign whose crypto allowlist exposed an unnecessary plaintext source.
 - `lactf-tier1-local-evidence-v1.json`: non-scored local-checker observations with candidate digests only.
+- `pwn-provider-live-smoke-v1.json`: candidate-free live proof that the pinned visible Tic-Tac-No ELF opened through the exact rootless, network-off, pull-never provider and emitted bounded output.
 - `ctf-dashboard-v3.png`: captured dashboard evidence.
 
 Version statistics distinguish known values from unavailable values. Solve rate, pass@k, latency, runtime, tokens, tool calls, cost, confidence, and holdout statistics are unavailable until two versions share complete independent authority over the same denominator. Do not convert diagnostic counts into scored metrics.

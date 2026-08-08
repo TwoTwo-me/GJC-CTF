@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "gjc-ctf-pwn-provider-live-smoke-1",
+  "generatedAt": "2026-08-08T16:07:37.319Z",
+  "status": "diagnostic-pass",
+  "challengeId": "lactf-2026-pwn-tic-tac-no",
+  "source": {
+    "repositoryUrl": "https://github.com/uclaacm/lactf-archive",
+    "sourceCommit": "3379d4a7b36680764a34e7dc817cc3c94c244764",
+    "challengePath": "2026/pwn/tic-tac-no",
+    "visibleFile": "chall",
+    "sha256": "df61599371d5c80a3ba9bfe8a60b247b8462e5096d737e79a9eff4ee55c4f335"
+  },
+  "provider": {
+    "codeCommit": "93a602a50812e996c0fd46bb43304c4a05118e7a",
+    "image": "docker.io/library/debian@sha256:b5ace515e78743215a1b101a6f17e59ed74b17132139ca3af3c37e605205e973",
+    "imageId": "c78f79ce571c009f21f956eca1f2a46d62efb505a11139eb8d3520c28739fc70",
+    "rootless": true,
+    "pull": "never",
+    "network": "none",
+    "readOnly": true,
+    "capabilities": "dropped",
+    "noNewPrivileges": true
+  },
+  "observation": {
+    "firstOutputBytes": 149,
+    "firstOutputSha256": "9dd6d1af085fe29f8163085ee74211f4ddbeb4b5c70415c2e3145fbbdbf6f071"
+  },
+  "authority": {
+    "scored": false,
+    "verifiedSolve": false,
+    "candidateProduced": false,
+    "archiveFlagUsed": false,
+    "trustedOracleUsed": false,
+    "permissionRecord": "unavailable"
+  }
+}
